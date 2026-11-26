@@ -189,7 +189,8 @@ def normal(work):
     p=w/'sing-box.json';p.write_text(json.dumps(s));os.chown(p,65532,65532);p.chmod(0o600)
     call('docker','run','--rm','--pull','never','--network','none','--user','65532:65532','--cap-drop','ALL','--security-opt','no-new-privileges','--read-only','--mount','type=bind,src='+str(work/'sing-box-acme.json')+',dst=/config.json,readonly','--entrypoint','sing-box',os.environ['VB_SBOX_IMAGE'],'check','-c','/config.json')
     no_ns(CLIENT);need(not {x['ifname'] for x in json.loads(call('ip','-j','link','show'))}&{WAN,'vb-peer'},'existing fixture link')
-    call('ip','netns','add',CLIENT);t=None;h=None;baseline=None
+    call('ip','netns','add',CLIENT);t=None;h=None;baseline=None;original=None
+    ns_inode=os.stat('/run/netns/'+CLIENT).st_ino
     try:
         call('ip','link','add',WAN,'type','veth','peer','name','vb-peer','netns',CLIENT)
         original=json.loads(call('ip','-j','link','show','dev',WAN))[0]['ifindex']
@@ -213,7 +214,31 @@ def normal(work):
             need(len(host)==1 and host[0]['ifindex']==original and 'LOWER_UP' in host[0]['flags'] and any(a.get('local')==IP and a.get('prefixlen')==29 for a in host[0].get('addr_info',[])),'fixture WAN address/identity lost')
             need(len(peer)==1 and {'198.18.254.2','198.18.254.3'}<={a['local'] for a in peer[0].get('addr_info',[]) if a.get('prefixlen')==29},'tester addresses missing')
             need(not call('ip','-n',CLIENT,'route','show','default') and not call('ip','-n',CLIENT,'-6','route','show','default'),'unexpected default route')
-        verify_fixture();time.sleep(.5);verify_fixture()
+        # Recover only a missing address on the same owned link before any
+        # Transaction exists. Never repair a running deployment or a replaced link.
+        # Repeated loss is a failure, not an ignored guard.
+        stable=0
+        repairs=0
+        for attempt in range(15):
+            link=json.loads(call('ip','-j','link','show','dev',WAN))
+            need(len(link)==1 and link[0]['ifindex']==original and 'LOWER_UP' in link[0]['flags'],'fixture link identity/carrier lost')
+            host=json.loads(call('ip','-j','-4','addr','show','dev',WAN))
+            present=len(host)==1 and any(a.get('local')==IP and a.get('prefixlen')==29 for a in host[0].get('addr_info',[]))
+            if not present:
+                need(not host or (len(host)==1 and host[0]['ifindex']==original and not host[0].get('addr_info')),'unexpected WAN address state')
+                repairs+=1
+                need(repairs<=2,'fixture WAN repeatedly loses address')
+                print('V2 fixture missing IPv4 before transaction; reassigning once per observed loss, attempt='+str(repairs),flush=True)
+                # No address flush or route changes. Only the absent synthetic address.
+                call('ip','addr','add',IP+'/29','dev',WAN)
+                stable=0
+            else:
+                verify_fixture()
+                stable+=1
+                if stable>=4:break
+            time.sleep(.5)
+        else:raise Failure('fixture WAN did not stabilize')
+        print('V2 fixture stable; repairs='+str(repairs),flush=True)
         h=LabHost(w);baseline=canaries(h,True)
         print('V2 actual Docker backend '+str(h.obj('docker','info','--format','{{json .}}').get('FirewallBackend')),flush=True)
         t=Transaction(h,w/'journal.json',{'fixture':'normal','ip':IP,'images':[h.sbox,h.cfg['mita_image_id']]})
@@ -253,8 +278,19 @@ def normal(work):
                 h.cmd(h.legacy_binary(f),'-t','filter','-F','VB2_CANARY')
                 h.cmd(h.legacy_binary(f),'-t','filter','-X','VB2_CANARY')
             h.cmd('nft','delete','table','inet','vb2_canary')
-        call('ip','netns','del',CLIENT)
-        if WAN in {x['ifname'] for x in json.loads(call('ip','-j','link','show'))}:call('ip','link','del',WAN)
+        # Scope cleanup to original immutable link and namespace identity.
+        rows=[x for x in json.loads(call('ip','-j','link','show')) if x['ifname']==WAN]
+        if rows:
+            need(original is not None and len(rows)==1 and rows[0]['ifindex']==original,'fixture cleanup identity mismatch')
+            proc=subprocess.run(['ip','link','del',WAN],capture_output=True,text=True,timeout=45)
+            if proc.returncode:print('V2 fixture veth delete rc='+str(proc.returncode)+'; checking absence',flush=True)
+            need(not {x['ifname'] for x in json.loads(call('ip','-j','link','show'))}&{WAN,'vb-peer'},'fixture veth deletion not confirmed')
+        if any(x.split()[0]==CLIENT for x in call('ip','netns','list').splitlines() if x):
+            need(os.stat('/run/netns/'+CLIENT).st_ino==ns_inode,'fixture namespace identity mismatch')
+            proc=subprocess.run(['ip','netns','del',CLIENT],capture_output=True,text=True,timeout=45)
+            if proc.returncode:print('V2 fixture namespace delete rc='+str(proc.returncode)+'; checking absence',flush=True)
+        no_ns(CLIENT)
+        need(not {x['ifname'] for x in json.loads(call('ip','-j','link','show'))}&{WAN,'vb-peer'},'fixture links remain')
 def main():
     gate();os.umask(0o077);work=pathlib.Path(sys.argv[1]).resolve();sources();errors=[]
     with exclusive_lock(work/'transaction-v2.lock'):

@@ -267,12 +267,23 @@ class Lifecycle:
                     need(id not in owned_rows('network',self.s['run']),'network removal not confirmed')
             self.verify_absence()
             # Only CI fixture names created by this journal are touched.
+            # Delete the owned veth while the owned peer namespace still exists.
+            # Namespace teardown can destroy the pair asynchronously. On any
+            # nonzero deletion result, accept only a successful fresh absence audit.
             if self.s['namespace'] and 'vb-client' in namespaces():
                 need(os.stat('/run/netns/vb-client').st_ino==self.s['ns_inode'],'namespace ownership uncertain')
-                out('ip','netns','del','vb-client')
             if self.s['veth'] and 'vb-wan' in links():
                 need(pathlib.Path('/sys/class/net/vb-wan/ifindex').read_text().strip()==self.s['ifindex'],'veth ownership uncertain')
-                out('ip','link','del','vb-wan')
+                p=call(['ip','link','del','vb-wan'],allow=True)
+                if p.returncode:
+                    print('LIFECYCLE veth delete rc='+str(p.returncode)+'; verifying absence',flush=True)
+                need(not links().intersection({'vb-wan','vb-peer'}),'veth deletion not confirmed')
+            if self.s['namespace'] and 'vb-client' in namespaces():
+                need(os.stat('/run/netns/vb-client').st_ino==self.s['ns_inode'],'namespace ownership uncertain')
+                p=call(['ip','netns','del','vb-client'],allow=True)
+                if p.returncode:
+                    print('LIFECYCLE namespace delete rc='+str(p.returncode)+'; verifying absence',flush=True)
+                need('vb-client' not in namespaces(),'namespace deletion not confirmed')
             need('vb-client' not in namespaces() and not links().intersection({'vb-wan','vb-peer'}),'namespace or veth remains')
             if table_exists():
                 self.table_guard()
