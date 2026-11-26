@@ -27,14 +27,7 @@ for cmd in docker nft ip openssl python3 curl git timeout tar sha256sum nsenter 
 nft list table inet vpn_benchmark >/dev/null 2>&1 && { echo 'Existing table'; exit 1; }
 for n in vb-sbox vb-mita; do if docker network inspect "$n" >/dev/null 2>&1; then echo 'Existing network'; exit 1; fi; done
 for n in vpn-test-singbox vpn-test-mita; do if docker inspect "$n" >/dev/null 2>&1; then echo 'Existing container'; exit 1; fi; done
-ip netns add vb-client; NS=1
-ip link add vb-wan type veth peer name vb-peer; VETH=1
-ip link set vb-peer netns vb-client
-ip addr add 198.18.254.1/29 dev vb-wan; ip link set vb-wan up
-ip -n vb-client addr add 198.18.254.2/29 dev vb-peer
-ip -n vb-client addr add 198.18.254.3/29 dev vb-peer
-ip -n vb-client link set lo up; ip -n vb-client link set vb-peer up
-[[ -z $(ip -n vb-client route show default) && -z $(ip -n vb-client -6 route show default) ]]
+# Create the transient veth only after downloads, builds and Docker network creation.
 # Fixed client releases; fetched by the runner, never by the isolated proxy.
 curl -fsSL --max-time 120 https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz -o "$WORK/sbox.tar.gz"
 echo "699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968  $WORK/sbox.tar.gz" | sha256sum -c -
@@ -83,6 +76,33 @@ nft -f "$WORK/firewall.nft"; TABLE=1
 NET1=$(docker network create --label vpn-benchmark=ci --driver bridge --subnet 172.30.241.0/28 --opt com.docker.network.bridge.name=br-vb-sbox vb-sbox)
 NET2=$(docker network create --label vpn-benchmark=ci --driver bridge --subnet 172.30.242.0/28 --opt com.docker.network.bridge.name=br-vb-mita vb-mita)
 for net in "$NET1" "$NET2"; do [[ $(docker network inspect "$net" --format '{{.EnableIPv6}}') == false ]]; done
+# Use only newly created lab interfaces; never reconfigure an existing interface.
+if ip link show vb-wan >/dev/null 2>&1 || ip link show vb-peer >/dev/null 2>&1 || ip netns list | grep -Eq '^vb-client([[:space:]]|$)'; then
+  echo 'FAIL: existing lab link or namespace'; exit 1
+fi
+ip netns add vb-client; NS=1
+ip link add vb-wan type veth peer name vb-peer; VETH=1
+ip link set vb-peer netns vb-client
+ip addr add 198.18.254.1/29 dev vb-wan; ip link set vb-wan up
+ip -n vb-client addr add 198.18.254.2/29 dev vb-peer
+ip -n vb-client addr add 198.18.254.3/29 dev vb-peer
+ip -n vb-client link set lo up; ip -n vb-client link set vb-peer up
+[[ -z $(ip -n vb-client route show default) && -z $(ip -n vb-client -6 route show default) ]]
+VB_WAN_IFINDEX=$(cat /sys/class/net/vb-wan/ifindex)
+lab_addresses() {
+  # Assert interface identity and exact local addresses; print only fixed lab metadata.
+  [[ $(cat /sys/class/net/vb-wan/ifindex) == "$VB_WAN_IFINDEX" ]] || return 1
+  ip -j -4 addr show dev vb-wan | python3 -c 'import json,sys; sys.exit(not any(a.get("local")=="198.18.254.1" and a.get("prefixlen")==29 for i in json.load(sys.stdin) for a in i.get("addr_info",[])))' || return 1
+  ip -n vb-client -j -4 addr show dev vb-peer | python3 -c 'import json,sys; a={x.get("local") for i in json.load(sys.stdin) for x in i.get("addr_info",[]) if x.get("prefixlen")==29}; sys.exit(not {"198.18.254.2","198.18.254.3"}<=a)' || return 1
+  [[ -z $(ip -n vb-client route show default) && -z $(ip -n vb-client -6 route show default) ]]
+}
+require_lab_addresses() {
+  local phase=$1
+  if lab_addresses; then echo "PASS: synthetic interface addresses ($phase)"; return 0; fi
+  echo "FAIL: synthetic interface addresses ($phase)"
+  return 1
+}
+require_lab_addresses created
 # Extra fixture addresses and processes are installed only after ingress readiness.
 C1=$(docker create --name vpn-test-singbox --label vpn-benchmark=ci --pull never --restart no --network vb-sbox --ip 172.30.241.2 --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m --cpus .75 --memory 384m --memory-swap 384m --pids-limit 128 -p 198.18.254.1:18443:18443/tcp -p 198.18.254.1:18445:18445/tcp --mount type=bind,src="$WORK/sing-box-lab.json",dst=/config.json,readonly --mount type=bind,src="$WORK/cert.pem",dst=/lab/cert.pem,readonly --mount type=bind,src="$WORK/key.pem",dst=/lab/key.pem,readonly --mount type=bind,src="$WORK/resolv.conf",dst=/etc/resolv.conf,readonly --entrypoint sing-box "$SBOX" run -c /config.json)
 C2=$(docker create --name vpn-test-mita --label vpn-benchmark=ci --pull never --restart no --network vb-mita --ip 172.30.242.2 --user "$VB_MITA_UID:$VB_MITA_GID" --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m --tmpfs /var/run/mita:rw,nosuid,nodev,noexec,uid=$VB_MITA_UID,gid=$VB_MITA_GID,mode=0700 --tmpfs /etc/mita:rw,nosuid,nodev,noexec,uid=$VB_MITA_UID,gid=$VB_MITA_GID,mode=0700 --tmpfs /var/lib/mita:rw,nosuid,nodev,noexec,uid=$VB_MITA_UID,gid=$VB_MITA_GID,mode=0700 --cpus .75 --memory 256m --memory-swap 256m --pids-limit 128 -p 198.18.254.1:18444:18444/tcp --mount type=bind,src="$WORK/mita.json",dst=/config.json,readonly --mount type=bind,src="$WORK/resolv.conf",dst=/etc/resolv.conf,readonly -e MITA_UDS_PATH=/var/run/mita/mita.sock -e MITA_CONFIG_JSON_FILE=/config.json --entrypoint /usr/local/bin/mita "$MITA" run)
@@ -134,7 +154,7 @@ wait_ready() {
 check_bind() {
   # Do not use IP_FREEBIND, wildcard listeners, or public interfaces.
   # Only the owned synthetic interface and ports are checked.
-  ip -j -4 addr show dev vb-wan | python3 -c 'import json,sys; assert any(a.get("local")=="198.18.254.1" and a.get("prefixlen")==29 for i in json.load(sys.stdin) for a in i.get("addr_info",[])), "synthetic host address missing"'
+  require_lab_addresses before-bind || return 1
   python3 - "$@" <<'PY'
 import errno, socket, sys
 for value in sys.argv[1:]:
@@ -148,12 +168,15 @@ for value in sys.argv[1:]:
         print("PASS: synthetic bind",port,flush=True)
 PY
 }
+require_lab_addresses containers-created
 check_bind 18443 18445
 start_container "$C1" vpn-test-singbox
 wait_ready "$C1" vpn-test-singbox 18443 18445
+require_lab_addresses singbox-ready
 check_bind 18444
 start_container "$C2" vpn-test-mita
 wait_ready "$C2" vpn-test-mita 18444
+require_lab_addresses mita-ready
 for port in 18443 18444 18445; do
   ip netns exec vb-client python3 ci/probe.py 198.18.254.2 198.18.254.1 "$port" allow
   ip netns exec vb-client python3 ci/probe.py 198.18.254.3 198.18.254.1 "$port" deny
@@ -181,8 +204,10 @@ for attempt in {1..30}; do
   sleep .2
 done
 [[ -f $WORK/wan.ready && -f $WORK/host.ready ]] || { echo 'FAIL: fixture readiness'; exit 1; }
+require_lab_addresses fixtures-ready
 export VB_C1=$C1 VB_C2=$C2
 python3 ci/functional.py "$WORK"
+require_lab_addresses functional-complete
 nft list table inet vpn_benchmark
 docker stop "$C1" "$C2" >/dev/null
 for port in 18443 18444 18445; do ip netns exec vb-client python3 ci/probe.py 198.18.254.2 198.18.254.1 "$port" deny; done
