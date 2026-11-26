@@ -33,15 +33,7 @@ ip link set vb-peer netns vb-client
 ip addr add 198.18.254.1/29 dev vb-wan; ip link set vb-wan up
 ip -n vb-client addr add 198.18.254.2/29 dev vb-peer
 ip -n vb-client addr add 198.18.254.3/29 dev vb-peer
-ip -n vb-client addr add 198.18.254.4/29 dev vb-peer
-ip -n vb-client addr add 198.18.254.5/29 dev vb-peer
-ip -n vb-client addr add 198.18.254.6/29 dev vb-peer
 ip -n vb-client link set lo up; ip -n vb-client link set vb-peer up
-# IPv6 fixture is local to the isolated veth, not a public service.
-sysctl -qw net.ipv6.conf.vb-wan.disable_ipv6=0
-ip netns exec vb-client sysctl -qw net.ipv6.conf.vb-peer.disable_ipv6=0
-ip -6 addr add fd42:198:18::1/64 dev vb-wan nodad
-ip -n vb-client -6 addr add fd42:198:18::4/64 dev vb-peer nodad
 [[ -z $(ip -n vb-client route show default) && -z $(ip -n vb-client -6 route show default) ]]
 # Fixed client releases; fetched by the runner, never by the isolated proxy.
 curl -fsSL --max-time 120 https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz -o "$WORK/sbox.tar.gz"
@@ -91,16 +83,7 @@ nft -f "$WORK/firewall.nft"; TABLE=1
 NET1=$(docker network create --label vpn-benchmark=ci --driver bridge --subnet 172.30.241.0/28 --opt com.docker.network.bridge.name=br-vb-sbox vb-sbox)
 NET2=$(docker network create --label vpn-benchmark=ci --driver bridge --subnet 172.30.242.0/28 --opt com.docker.network.bridge.name=br-vb-mita vb-mita)
 for net in "$NET1" "$NET2"; do [[ $(docker network inspect "$net" --format '{{.EnableIPv6}}') == false ]]; done
-ip netns exec vb-client python3 ci/fixtures.py "$WORK" wan >"$WORK/wan-fixture.log" 2>&1 &
-FIXTURE=$!
-python3 ci/fixtures.py "$WORK" host >"$WORK/host-fixture.log" 2>&1 &
-HOST_FIXTURE=$!
-for attempt in {1..30}; do
-  if [[ -f $WORK/wan.ready && -f $WORK/host.ready ]]; then break; fi
-  kill -0 "$FIXTURE" && kill -0 "$HOST_FIXTURE" || { echo 'FAIL: fixture exited'; exit 1; }
-  sleep .2
-done
-[[ -f $WORK/wan.ready && -f $WORK/host.ready ]] || { echo 'FAIL: fixture readiness'; exit 1; }
+# Extra fixture addresses and processes are installed only after ingress readiness.
 C1=$(docker create --name vpn-test-singbox --label vpn-benchmark=ci --pull never --restart no --network vb-sbox --ip 172.30.241.2 --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m --cpus .75 --memory 384m --memory-swap 384m --pids-limit 128 -p 198.18.254.1:18443:18443/tcp -p 198.18.254.1:18445:18445/tcp --mount type=bind,src="$WORK/sing-box-lab.json",dst=/config.json,readonly --mount type=bind,src="$WORK/cert.pem",dst=/lab/cert.pem,readonly --mount type=bind,src="$WORK/key.pem",dst=/lab/key.pem,readonly --mount type=bind,src="$WORK/resolv.conf",dst=/etc/resolv.conf,readonly --entrypoint sing-box "$SBOX" run -c /config.json)
 C2=$(docker create --name vpn-test-mita --label vpn-benchmark=ci --pull never --restart no --network vb-mita --ip 172.30.242.2 --user "$VB_MITA_UID:$VB_MITA_GID" --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m --tmpfs /var/run/mita:rw,nosuid,nodev,noexec,uid=$VB_MITA_UID,gid=$VB_MITA_GID,mode=0700 --tmpfs /etc/mita:rw,nosuid,nodev,noexec,uid=$VB_MITA_UID,gid=$VB_MITA_GID,mode=0700 --tmpfs /var/lib/mita:rw,nosuid,nodev,noexec,uid=$VB_MITA_UID,gid=$VB_MITA_GID,mode=0700 --cpus .75 --memory 256m --memory-swap 256m --pids-limit 128 -p 198.18.254.1:18444:18444/tcp --mount type=bind,src="$WORK/mita.json",dst=/config.json,readonly --mount type=bind,src="$WORK/resolv.conf",dst=/etc/resolv.conf,readonly -e MITA_UDS_PATH=/var/run/mita/mita.sock -e MITA_CONFIG_JSON_FILE=/config.json --entrypoint /usr/local/bin/mita "$MITA" run)
 diagnose_container() {
@@ -114,6 +97,8 @@ start_container() {
   if ! docker start "$id" >/dev/null 2>"$WORK/start-error"; then
     echo "FAIL: Docker start $name"
     python3 ci/diagnose.py <"$WORK/start-error"
+    # Recheck the address and failed ports after the daemon error, without raw logs.
+    if [[ $name == vpn-test-singbox ]]; then check_bind 18443 18445 || true; else check_bind 18444 || true; fi
     diagnose_container "$id" "$name"
     return 1
   fi
@@ -146,8 +131,27 @@ wait_ready() {
   diagnose_container "$id" "$name"
   return 1
 }
+check_bind() {
+  # Do not use IP_FREEBIND, wildcard listeners, or public interfaces.
+  # Only the owned synthetic interface and ports are checked.
+  ip -j -4 addr show dev vb-wan | python3 -c 'import json,sys; assert any(a.get("local")=="198.18.254.1" and a.get("prefixlen")==29 for i in json.load(sys.stdin) for a in i.get("addr_info",[])), "synthetic host address missing"'
+  python3 - "$@" <<'PY'
+import errno, socket, sys
+for value in sys.argv[1:]:
+    port=int(value)
+    with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("198.18.254.1",port))
+        except OSError as exc:
+            print("FAIL: synthetic bind",port,"errno",exc.errno,errno.errorcode.get(exc.errno,"UNKNOWN"),flush=True)
+            sys.exit(1)
+        print("PASS: synthetic bind",port,flush=True)
+PY
+}
+check_bind 18443 18445
 start_container "$C1" vpn-test-singbox
 wait_ready "$C1" vpn-test-singbox 18443 18445
+check_bind 18444
 start_container "$C2" vpn-test-mita
 wait_ready "$C2" vpn-test-mita 18444
 for port in 18443 18444 18445; do
@@ -158,6 +162,25 @@ if [[ ${VB_FAIL_AFTER_START:-0} == 1 ]]; then
   echo 'FAULT_INJECTED: both containers ready; exiting with code 42'
   exit 42
 fi
+ip -n vb-client addr add 198.18.254.4/29 dev vb-peer
+ip -n vb-client addr add 198.18.254.5/29 dev vb-peer
+ip -n vb-client addr add 198.18.254.6/29 dev vb-peer
+# IPv6 fixture is local to the isolated veth, not a public service.
+sysctl -qw net.ipv6.conf.vb-wan.disable_ipv6=0
+ip netns exec vb-client sysctl -qw net.ipv6.conf.vb-peer.disable_ipv6=0
+ip -6 addr add fd42:198:18::1/64 dev vb-wan nodad
+ip -n vb-client -6 addr add fd42:198:18::4/64 dev vb-peer nodad
+[[ -z $(ip -n vb-client route show default) && -z $(ip -n vb-client -6 route show default) ]]
+ip netns exec vb-client python3 ci/fixtures.py "$WORK" wan >"$WORK/wan-fixture.log" 2>&1 &
+FIXTURE=$!
+python3 ci/fixtures.py "$WORK" host >"$WORK/host-fixture.log" 2>&1 &
+HOST_FIXTURE=$!
+for attempt in {1..30}; do
+  if [[ -f $WORK/wan.ready && -f $WORK/host.ready ]]; then break; fi
+  kill -0 "$FIXTURE" && kill -0 "$HOST_FIXTURE" || { echo 'FAIL: fixture exited'; exit 1; }
+  sleep .2
+done
+[[ -f $WORK/wan.ready && -f $WORK/host.ready ]] || { echo 'FAIL: fixture readiness'; exit 1; }
 export VB_C1=$C1 VB_C2=$C2
 python3 ci/functional.py "$WORK"
 nft list table inet vpn_benchmark

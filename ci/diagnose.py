@@ -24,6 +24,13 @@ def main():
     labels = classify(data)
     print("diagnostic_categories=" + (",".join(labels) if labels else "unclassified"))
     print("raw_log_lines=" + str(len(data.splitlines())) + " (content withheld)")
+    # Only fixed synthetic addresses and port labels; no arbitrary log substrings.
+    for addr in ("198.18.254.1", "172.30.241.2", "172.30.242.2"):
+        for port in (18443,18444,18445):
+            if f"{addr}:{port}" in data:
+                print("synthetic_endpoint_mentioned="+addr+":"+str(port))
+    for label, marker in (("port_mapping","port mapping"),("host_port","host port"),("userland_proxy","userland proxy"),("external_connectivity","external connectivity"),("network_endpoint","endpoint")):
+        if marker in data.lower(): print("docker_context="+label)
 
 if __name__ == "__main__":
     main()
