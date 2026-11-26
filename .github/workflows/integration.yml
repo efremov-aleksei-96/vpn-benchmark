@@ -24,7 +24,22 @@ jobs:
       - name: Static checks
         run: |
           bash -n ci/lab.sh
+          bash -n ci/verify-cleanup.sh
+          python3 -m py_compile ci/*.py
           python3 -m json.tool candidate/sing-box.json >/dev/null
           python3 -m json.tool candidate/mita.json >/dev/null
       - name: Native validation and isolated network test
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT bash ci/lab.sh
+      - name: Check normal cleanup
+        run: bash ci/verify-cleanup.sh
+      - name: Inject startup failure and verify rollback
+        run: |
+          set +e
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT env VB_FAIL_AFTER_START=1 bash ci/lab.sh
+          rc=$?
+          set -e
+          test "$rc" -eq 42
+          bash ci/verify-cleanup.sh
+      - name: Final cleanup audit
+        if: always()
+        run: bash ci/verify-cleanup.sh
