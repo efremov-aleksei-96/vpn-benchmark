@@ -3,7 +3,7 @@
 All inputs are synthetic. Fault cases use real netfilter in unrouted namespaces.
 Normal case uses inherited operational Host methods with real Docker.
 """
-import hashlib,json,os,pathlib,re,shutil,subprocess,sys,traceback
+import hashlib,json,os,pathlib,re,shutil,subprocess,sys,time,traceback
 HERE=pathlib.Path(__file__).resolve().parent
 ROOT=HERE.parents[1]
 sys.path.extend([str(ROOT/'candidate'),str(ROOT/'ci')])
@@ -37,7 +37,9 @@ class LabHost(Host):
         self.uid=int(os.environ['VB_MITA_UID']);self.gid=int(os.environ['VB_MITA_GID']);self.sbox=os.environ['VB_SBOX_IMAGE']
         need(self.w.is_dir() and self.w.stat().st_uid==0 and self.w.stat().st_mode&0o077==0,'private work required')
         need(self.uid>0 and self.gid>0 and all(re.fullmatch(r'sha256:[a-f0-9]{64}',x) for x in (self.sbox,self.cfg['mita_image_id'])),'invalid fixture identity')
-        self.ifindex=self.obj('ip','-j','-4','addr','show','dev',WAN)[0]['ifindex']
+        rows=self.obj('ip','-j','-4','addr','show','dev',WAN)
+        need(len(rows)==1 and any(a.get('local')==IP for a in rows[0].get('addr_info',[])),'synthetic WAN IPv4 missing before transaction')
+        self.ifindex=rows[0]['ifindex']
     def cmd(self,*args,timeout=45,data=None):
         if self.ns:args=('ip','netns','exec',self.ns,*args)
         return super().cmd(*args,timeout=timeout,data=data)
@@ -166,12 +168,29 @@ def normal(work):
     no_ns(CLIENT);need(not {x['ifname'] for x in json.loads(call('ip','-j','link','show'))}&{WAN,'vb-peer'},'existing fixture link')
     call('ip','netns','add',CLIENT);t=None;h=None;baseline=None
     try:
-        call('ip','link','add',WAN,'type','veth','peer','name','vb-peer')
-        call('ip','link','set','vb-peer','netns',CLIENT)
-        call('ip','addr','add',IP+'/29','dev',WAN);call('ip','link','set',WAN,'up')
-        for ip in ('198.18.254.2','198.18.254.3'):call('ip','-n',CLIENT,'addr','add',ip+'/29','dev','vb-peer')
+        call('ip','link','add',WAN,'type','veth','peer','name','vb-peer','netns',CLIENT)
+        original=json.loads(call('ip','-j','link','show','dev',WAN))[0]['ifindex']
         for dev in ('lo','vb-peer'):call('ip','-n',CLIENT,'link','set',dev,'up')
-        need(not call('ip','-n',CLIENT,'route','show','default'),'unexpected default route')
+        call('ip','link','set',WAN,'up')
+        # Wait for both ends to have carrier before assigning the synthetic addresses.
+        for _ in range(30):
+            link=json.loads(call('ip','-j','link','show','dev',WAN))[0]
+            need(link['ifindex']==original,'fixture link replaced')
+            if 'LOWER_UP' in link['flags']:break
+            time.sleep(.1)
+        else:raise Failure('synthetic veth carrier missing')
+        for ip in ('198.18.254.2','198.18.254.3'):call('ip','-n',CLIENT,'addr','add',ip+'/29','dev','vb-peer')
+        call('ip','addr','add',IP+'/29','dev',WAN)
+        # Only during fixture creation: allow async link setup to settle, then
+        # verify exact address and identity. No address repair after apply starts.
+        def verify_fixture():
+            host=json.loads(call('ip','-j','-4','addr','show','dev',WAN))
+            peer=json.loads(call('ip','-n',CLIENT,'-j','-4','addr','show','dev','vb-peer'))
+            print('V2 fixture readback WAN='+str([(r['ifindex'],r.get('flags'),[(a.get('local'),a.get('prefixlen')) for a in r.get('addr_info',[])]) for r in host])+' peer='+str([(r['ifindex'],[(a.get('local'),a.get('prefixlen')) for a in r.get('addr_info',[])]) for r in peer]),flush=True)
+            need(len(host)==1 and host[0]['ifindex']==original and 'LOWER_UP' in host[0]['flags'] and any(a.get('local')==IP and a.get('prefixlen')==29 for a in host[0].get('addr_info',[])),'fixture WAN address/identity lost')
+            need(len(peer)==1 and {'198.18.254.2','198.18.254.3'}<={a['local'] for a in peer[0].get('addr_info',[]) if a.get('prefixlen')==29},'tester addresses missing')
+            need(not call('ip','-n',CLIENT,'route','show','default') and not call('ip','-n',CLIENT,'-6','route','show','default'),'unexpected default route')
+        verify_fixture();time.sleep(.5);verify_fixture()
         h=LabHost(w);baseline=canaries(h,True)
         print('V2 actual Docker backend '+str(h.obj('docker','info','--format','{{json .}}').get('FirewallBackend')),flush=True)
         t=Transaction(h,w/'journal.json',{'fixture':'normal','ip':IP,'images':[h.sbox,h.cfg['mita_image_id']]})
