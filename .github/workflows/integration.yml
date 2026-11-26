@@ -1,5 +1,11 @@
 name: VPN benchmark disposable lab
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'ci/**'
+      - 'candidate/**'
+      - '.github/workflows/integration.yml'
   workflow_dispatch:
     inputs:
       lab_confirmed:
@@ -14,7 +20,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   integration:
-    if: ${{ inputs.lab_confirmed && github.event.repository.name == 'vpn-benchmark' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.repository == 'efremov-aleksei-96/vpn-benchmark' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.lab_confirmed)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
