@@ -6,7 +6,10 @@ for name in ['sing-box.json','mita.json','firewall.nft']:
     for k,v in repl.items(): text=text.replace(k,v)
     assert '__' not in text, 'unresolved placeholder'
     target=w/('sing-box-acme.json' if name=='sing-box.json' else name);target.write_text(text)
-    target.chmod(0o600);os.chown(target,65532,65532)
+    target.chmod(0o600)
+    owner=(int(os.environ['VB_MITA_UID']),int(os.environ['VB_MITA_GID'])) if name=='mita.json' else (65532,65532)
+    assert all(x>0 for x in owner), 'non-root ownership required'
+    os.chown(target,*owner)
 subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=VPN benchmark local lab','-addext','subjectAltName=IP:198.18.254.1','-keyout',str(w/'key.pem'),'-out',str(w/'cert.pem')],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 for p in [w/'key.pem',w/'cert.pem']:
     p.chmod(0o600);os.chown(p,65532,65532)
