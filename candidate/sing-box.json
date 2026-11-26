@@ -1,0 +1,126 @@
+{
+  "log": {
+    "level": "warn"
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "udp",
+        "tag": "public-dns",
+        "server": "1.1.1.1"
+      }
+    ],
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "raw",
+      "listen": "172.30.241.2",
+      "listen_port": 18443,
+      "users": [
+        {
+          "name": "benchmark",
+          "uuid": "__VLESS_UUID__",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "__REALITY_HOST__",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "__REALITY_HOST__",
+            "server_port": 443
+          },
+          "private_key": "__REALITY_PRIVATE_KEY__",
+          "short_id": [
+            "__REALITY_SHORT_ID__"
+          ]
+        }
+      }
+    },
+    {
+      "type": "naive",
+      "tag": "naive",
+      "network": "tcp",
+      "listen": "172.30.241.2",
+      "listen_port": 18445,
+      "users": [
+        {
+          "username": "benchmark",
+          "password": "__NAIVE_PASSWORD__"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "alpn": [
+          "h2"
+        ],
+        "certificate_provider": {
+          "type": "acme",
+          "domain": [
+            "__PUBLIC_IPV4__"
+          ],
+          "data_directory": "/acme/staging",
+          "default_server_name": "__PUBLIC_IPV4__",
+          "provider": "https://acme-staging-v02.api.letsencrypt.org/directory",
+          "profile": "shortlived",
+          "disable_tls_alpn_challenge": true,
+          "alternative_http_port": 8080
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "default_domain_resolver": "public-dns",
+    "rules": [
+      {
+        "action": "resolve",
+        "server": "public-dns",
+        "strategy": "ipv4_only"
+      },
+      {
+        "ip_cidr": [
+          "0.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "127.0.0.0/8",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.0.0.0/24",
+          "192.0.2.0/24",
+          "192.168.0.0/16",
+          "198.18.0.0/15",
+          "198.51.100.0/24",
+          "203.0.113.0/24",
+          "224.0.0.0/4",
+          "240.0.0.0/4",
+          "::/0",
+          "__PUBLIC_IPV4__/32"
+        ],
+        "action": "reject"
+      },
+      {
+        "network": "udp",
+        "action": "reject"
+      },
+      {
+        "port": 443,
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "action": "reject"
+      }
+    ],
+    "final": "direct"
+  }
+}

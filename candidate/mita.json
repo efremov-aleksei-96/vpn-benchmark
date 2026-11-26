@@ -1,0 +1,21 @@
+{
+  "portBindings": [
+    {
+      "port": 18444,
+      "protocol": "TCP"
+    }
+  ],
+  "listenIPAddress": "172.30.242.2",
+  "users": [
+    {
+      "name": "benchmark",
+      "password": "__MIERU_PASSWORD__",
+      "allowPrivateIP": false,
+      "allowLoopbackIP": false
+    }
+  ],
+  "loggingLevel": "WARN",
+  "dns": {
+    "dualStack": "ONLY_IPv4"
+  }
+}

@@ -1,0 +1,42 @@
+# TEMPLATE: replace placeholders and check with nft -c -f on a disposable Linux host.
+# Never flush the existing ruleset. New table only.
+table inet vpn_benchmark {
+    set testers4 {
+        type ipv4_addr
+        flags interval
+        elements = { __TESTER_IPV4_CIDRS__ }
+    }
+    set forbidden4 {
+        type ipv4_addr
+        flags interval
+        auto-merge
+        elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4, __PUBLIC_IPV4__/32 }
+    }
+    chain input {
+        type filter hook input priority -5; policy accept;
+        iifname { "br-vb-sbox", "br-vb-mita" } counter drop
+    }
+    chain forward {
+        type filter hook forward priority -5; policy accept;
+        iifname { "br-vb-sbox", "br-vb-mita" } meta nfproto ipv6 counter drop
+        oifname { "br-vb-sbox", "br-vb-mita" } meta nfproto ipv6 counter drop
+        iifname { "br-vb-sbox", "br-vb-mita" } ct state invalid counter drop
+        oifname { "br-vb-sbox", "br-vb-mita" } ct state invalid counter drop
+        iifname "__WAN_IF__" oifname "br-vb-sbox" ip saddr @testers4 ip daddr 172.30.241.2 tcp dport 18443 ct direction original ct status dnat ct original ip daddr __PUBLIC_IPV4__ ct original proto-dst 18443 ct state { new, established } counter accept
+        iifname "__WAN_IF__" oifname "br-vb-sbox" ip saddr @testers4 ip daddr 172.30.241.2 tcp dport 18445 ct direction original ct status dnat ct original ip daddr __PUBLIC_IPV4__ ct original proto-dst 18445 ct state { new, established } counter accept
+        iifname "__WAN_IF__" oifname "br-vb-mita" ip saddr @testers4 ip daddr 172.30.242.2 tcp dport 18444 ct direction original ct status dnat ct original ip daddr __PUBLIC_IPV4__ ct original proto-dst 18444 ct state { new, established } counter accept
+        iifname "__WAN_IF__" oifname "br-vb-sbox" ip daddr 172.30.241.2 tcp dport 8080 ct direction original ct status dnat ct original ip daddr __PUBLIC_IPV4__ ct original proto-dst 80 ct state { new, established } counter accept
+        iifname "__WAN_IF__" oifname "br-vb-sbox" ip daddr 172.30.241.2 ct direction reply ct state established counter accept
+        iifname "__WAN_IF__" oifname "br-vb-mita" ip daddr 172.30.242.2 ct direction reply ct state established counter accept
+        iifname "br-vb-sbox" oifname "__WAN_IF__" ip saddr 172.30.241.2 ct direction reply ct status dnat ct state established counter accept
+        iifname "br-vb-mita" oifname "__WAN_IF__" ip saddr 172.30.242.2 ct direction reply ct status dnat ct state established counter accept
+        oifname { "br-vb-sbox", "br-vb-mita" } counter drop
+        iifname "br-vb-sbox" ip saddr != 172.30.241.2 counter drop
+        iifname "br-vb-mita" ip saddr != 172.30.242.2 counter drop
+        iifname { "br-vb-sbox", "br-vb-mita" } ip daddr @forbidden4 counter drop
+        iifname { "br-vb-sbox", "br-vb-mita" } oifname "__WAN_IF__" ip daddr 1.1.1.1 udp dport 53 ct direction original ct state { new, established } counter accept
+        iifname { "br-vb-sbox", "br-vb-mita" } oifname "__WAN_IF__" ip daddr 1.1.1.1 tcp dport 53 ct direction original ct state { new, established } counter accept
+        iifname { "br-vb-sbox", "br-vb-mita" } oifname "__WAN_IF__" tcp dport 443 ct direction original ct state { new, established } counter accept
+        iifname { "br-vb-sbox", "br-vb-mita" } counter drop
+    }
+}

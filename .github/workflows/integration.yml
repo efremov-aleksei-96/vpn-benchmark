@@ -1,0 +1,30 @@
+name: VPN benchmark disposable lab
+on:
+  workflow_dispatch:
+    inputs:
+      lab_confirmed:
+        description: 'Run the disposable lab with synthetic values only'
+        type: boolean
+        required: true
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: vpn-benchmark-lab
+  cancel-in-progress: false
+jobs:
+  integration:
+    if: ${{ inputs.lab_confirmed && github.event.repository.name == 'vpn-benchmark' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Static checks
+        run: |
+          bash -n ci/lab.sh
+          python3 -m json.tool candidate/sing-box.json >/dev/null
+          python3 -m json.tool candidate/mita.json >/dev/null
+      - name: Native validation and isolated network test
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT bash ci/lab.sh
