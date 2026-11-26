@@ -17,6 +17,7 @@ cleanup() {
     echo 'FAIL: lifecycle matrix incomplete; retain private journal in disposable VM'
     bad=1
   fi
+  if ((bad == 0)) && [[ -f $WORK/legacy-guard.json ]]; then python3 ci/legacy_guard_ci.py remove "$WORK" || bad=1; fi
   if ((bad)); then echo 'FAIL: cleanup incomplete; no broad cleanup attempted'; exit 1; fi
   rm -rf -- "$WORK"
   exit "$rc"
@@ -71,6 +72,7 @@ for file in sing-box-acme.json sing-box-lab.json; do
   docker run --rm --network none --entrypoint sing-box -v "$WORK:/lab:ro" "$SBOX" check -c "/lab/$file" >/dev/null 2>&1 || { echo "FAIL: native sing-box check $file"; exit 1; }
 done
 export VB_SBOX_IMAGE=$SBOX VB_MITA_IMAGE=$MITA
+python3 ci/legacy_guard_ci.py install "$WORK"
 if [[ ${VB_LIFECYCLE_MATRIX:-0} == 1 ]]; then
   MATRIX_ACTIVE=1
   python3 ci/lifecycle.py matrix "$WORK"
@@ -111,6 +113,7 @@ done
 python3 ci/lifecycle.py verify "$WORK"
 export VB_C1=$C1 VB_C2=$C2
 python3 ci/functional.py "$WORK"
+python3 ci/test_guard.py "$WORK"
 python3 ci/lifecycle.py verify "$WORK"
 nft list table inet vpn_benchmark
 python3 ci/lifecycle.py stop "$WORK"

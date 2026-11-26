@@ -97,9 +97,11 @@ class Lifecycle:
         self.s['pending']=None;self.event(stage,'result',exit=0)
         return response
     def table_guard(self):
+        out(sys.executable,'ci/legacy_guard_ci.py','check',str(self.w))
         need(self.s['table'] is not None and table_exists(),'firewall missing')
         need(sha(table_text())==self.s['table'],'firewall fingerprint changed')
     def preflight(self):
+        out(sys.executable,'ci/legacy_guard_ci.py','check',str(self.w))
         need(not table_exists(),'existing firewall')
         need(not owned_rows('container',self.s['run']) and not owned_rows('network',self.s['run']),'existing Docker objects')
         need(not links().intersection({'vb-wan','vb-peer',NETS[0][1],NETS[1][1]}) and 'vb-client' not in namespaces(),'existing lab interface')

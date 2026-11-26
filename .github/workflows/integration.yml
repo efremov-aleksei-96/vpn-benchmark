@@ -31,7 +31,7 @@ jobs:
         run: |
           bash -n ci/lab.sh
           bash -n ci/verify-cleanup.sh
-          python3 -m py_compile ci/*.py
+          python3 -m py_compile ci/*.py candidate/*.py
           python3 -m json.tool candidate/sing-box.json >/dev/null
           python3 -m json.tool candidate/mita.json >/dev/null
       - name: Native validation and isolated network test

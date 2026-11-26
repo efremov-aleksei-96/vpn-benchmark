@@ -26,6 +26,8 @@ f=f.replace(anchor, '''        # Synthetic WAN HTTPS and DNS endpoints, never pr
         iifname { "br-vb-sbox", "br-vb-mita" } oifname "vb-wan" ip daddr 198.18.254.5 udp dport 53 ct direction original ct state { new, established } counter accept
         iifname { "br-vb-sbox", "br-vb-mita" } oifname "vb-wan" ip daddr 198.18.254.5 tcp dport 53 ct direction original ct state { new, established } counter accept
 '''+anchor)
+# Synthetic allows must receive the same per-packet permit bit as production.
+f=f.replace('counter accept','counter meta mark set meta mark | 0x40000000 accept')
 # Remove general production egress allows in the lab variant. Only local fixtures may be reached.
 f='\n'.join(line for line in f.splitlines() if not ('oifname "vb-wan"' in line and ('ip daddr 1.1.1.1' in line or ('tcp dport 443' in line and 'ip daddr 198.18.254.4' not in line))))+'\n'
 (w/'firewall.nft').write_text(f)

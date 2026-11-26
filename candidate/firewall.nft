@@ -15,6 +15,14 @@ table inet vpn_benchmark {
     chain input {
         type filter hook input priority -5; policy accept;
         iifname { "br-vb-sbox", "br-vb-mita" } counter drop
+        # Never let a published port fall through to a host-local docker-proxy.
+        ip daddr __PUBLIC_IPV4__ tcp dport { 80, 18443, 18444, 18445 } counter drop
+    }
+    chain output {
+        type filter hook output priority -5; policy accept;
+        oifname { "br-vb-sbox", "br-vb-mita" } counter drop
+        ip daddr { 172.30.241.2, 172.30.242.2 } counter drop
+        ip daddr __PUBLIC_IPV4__ tcp dport { 80, 18443, 18444, 18445 } counter drop
     }
     chain forward {
         type filter hook forward priority -5; policy accept;
@@ -22,21 +30,21 @@ table inet vpn_benchmark {
         oifname { "br-vb-sbox", "br-vb-mita" } meta nfproto ipv6 counter drop
         iifname { "br-vb-sbox", "br-vb-mita" } ct state invalid counter drop
         oifname { "br-vb-sbox", "br-vb-mita" } ct state invalid counter drop
-        iifname "__WAN_IF__" oifname "br-vb-sbox" ip saddr @testers4 ip daddr 172.30.241.2 tcp dport 18443 ct direction original ct status dnat ct original ip daddr __PUBLIC_IPV4__ ct original proto-dst 18443 ct state { new, established } counter accept
-        iifname "__WAN_IF__" oifname "br-vb-sbox" ip saddr @testers4 ip daddr 172.30.241.2 tcp dport 18445 ct direction original ct status dnat ct original ip daddr __PUBLIC_IPV4__ ct original proto-dst 18445 ct state { new, established } counter accept
-        iifname "__WAN_IF__" oifname "br-vb-mita" ip saddr @testers4 ip daddr 172.30.242.2 tcp dport 18444 ct direction original ct status dnat ct original ip daddr __PUBLIC_IPV4__ ct original proto-dst 18444 ct state { new, established } counter accept
-        iifname "__WAN_IF__" oifname "br-vb-sbox" ip daddr 172.30.241.2 tcp dport 8080 ct direction original ct status dnat ct original ip daddr __PUBLIC_IPV4__ ct original proto-dst 80 ct state { new, established } counter accept
-        iifname "__WAN_IF__" oifname "br-vb-sbox" ip daddr 172.30.241.2 ct direction reply ct state established counter accept
-        iifname "__WAN_IF__" oifname "br-vb-mita" ip daddr 172.30.242.2 ct direction reply ct state established counter accept
-        iifname "br-vb-sbox" oifname "__WAN_IF__" ip saddr 172.30.241.2 ct direction reply ct status dnat ct state established counter accept
-        iifname "br-vb-mita" oifname "__WAN_IF__" ip saddr 172.30.242.2 ct direction reply ct status dnat ct state established counter accept
+        iifname "__WAN_IF__" oifname "br-vb-sbox" ip saddr @testers4 ip daddr 172.30.241.2 tcp dport 18443 ct direction original ct status dnat ct original ip daddr __PUBLIC_IPV4__ ct original proto-dst 18443 ct state { new, established } counter meta mark set meta mark | 0x40000000 accept
+        iifname "__WAN_IF__" oifname "br-vb-sbox" ip saddr @testers4 ip daddr 172.30.241.2 tcp dport 18445 ct direction original ct status dnat ct original ip daddr __PUBLIC_IPV4__ ct original proto-dst 18445 ct state { new, established } counter meta mark set meta mark | 0x40000000 accept
+        iifname "__WAN_IF__" oifname "br-vb-mita" ip saddr @testers4 ip daddr 172.30.242.2 tcp dport 18444 ct direction original ct status dnat ct original ip daddr __PUBLIC_IPV4__ ct original proto-dst 18444 ct state { new, established } counter meta mark set meta mark | 0x40000000 accept
+        iifname "__WAN_IF__" oifname "br-vb-sbox" ip daddr 172.30.241.2 tcp dport 8080 ct direction original ct status dnat ct original ip daddr __PUBLIC_IPV4__ ct original proto-dst 80 ct state { new, established } counter meta mark set meta mark | 0x40000000 accept
+        iifname "__WAN_IF__" oifname "br-vb-sbox" ip daddr 172.30.241.2 ct direction reply ct state established counter meta mark set meta mark | 0x40000000 accept
+        iifname "__WAN_IF__" oifname "br-vb-mita" ip daddr 172.30.242.2 ct direction reply ct state established counter meta mark set meta mark | 0x40000000 accept
+        iifname "br-vb-sbox" oifname "__WAN_IF__" ip saddr 172.30.241.2 ct direction reply ct status dnat ct state established counter meta mark set meta mark | 0x40000000 accept
+        iifname "br-vb-mita" oifname "__WAN_IF__" ip saddr 172.30.242.2 ct direction reply ct status dnat ct state established counter meta mark set meta mark | 0x40000000 accept
         oifname { "br-vb-sbox", "br-vb-mita" } counter drop
         iifname "br-vb-sbox" ip saddr != 172.30.241.2 counter drop
         iifname "br-vb-mita" ip saddr != 172.30.242.2 counter drop
         iifname { "br-vb-sbox", "br-vb-mita" } ip daddr @forbidden4 counter drop
-        iifname { "br-vb-sbox", "br-vb-mita" } oifname "__WAN_IF__" ip daddr 1.1.1.1 udp dport 53 ct direction original ct state { new, established } counter accept
-        iifname { "br-vb-sbox", "br-vb-mita" } oifname "__WAN_IF__" ip daddr 1.1.1.1 tcp dport 53 ct direction original ct state { new, established } counter accept
-        iifname { "br-vb-sbox", "br-vb-mita" } oifname "__WAN_IF__" tcp dport 443 ct direction original ct state { new, established } counter accept
+        iifname { "br-vb-sbox", "br-vb-mita" } oifname "__WAN_IF__" ip daddr 1.1.1.1 udp dport 53 ct direction original ct state { new, established } counter meta mark set meta mark | 0x40000000 accept
+        iifname { "br-vb-sbox", "br-vb-mita" } oifname "__WAN_IF__" ip daddr 1.1.1.1 tcp dport 53 ct direction original ct state { new, established } counter meta mark set meta mark | 0x40000000 accept
+        iifname { "br-vb-sbox", "br-vb-mita" } oifname "__WAN_IF__" tcp dport 443 ct direction original ct state { new, established } counter meta mark set meta mark | 0x40000000 accept
         iifname { "br-vb-sbox", "br-vb-mita" } counter drop
     }
 }
