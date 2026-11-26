@@ -41,6 +41,29 @@ class LabHost(Host):
         need(len(rows)==1 and any(a.get('local')==IP for a in rows[0].get('addr_info',[])),'synthetic WAN IPv4 missing before transaction')
         self.ifindex=rows[0]['ifindex']
     def cmd(self,*args,timeout=45,data=None):
+        # Only the synthetic TLS check needs its local cert/key bind. The
+        # production ACME config was checked independently without this mount.
+        native=('docker','run','--rm','--pull','never','--network','none','--user','65532:65532','--cap-drop','ALL','--security-opt','no-new-privileges','--read-only','--mount','type=bind,src='+str(self.w/'sing-box.json')+',dst=/config.json,readonly','--entrypoint','sing-box',self.sbox,'check','-c','/config.json')
+        if self.ns is None and args==native:
+            tls=json.loads((self.w/'sing-box.json').read_text())['inbounds'][1]['tls']
+            need(tls.get('certificate_path')=='/acme/cert.pem' and tls.get('key_path')=='/acme/key.pem' and 'certificate_provider' not in tls,'unexpected synthetic TLS config')
+            for filename in ('cert.pem','key.pem'):
+                p=self.w/'acme'/filename;st=p.lstat()
+                need(p.is_file() and not p.is_symlink() and (st.st_uid,st.st_gid,st.st_mode&0o777)==(65532,65532,0o600),'unsafe synthetic TLS file')
+            # Verify that the old check fails specifically for the missing file,
+            # without printing arbitrary stderr or any credential values.
+            probe=subprocess.run(args,capture_output=True,text=True,timeout=timeout)
+            if probe.returncode:
+                missing=any(path in probe.stderr for path in ('/acme/cert.pem','/acme/key.pem')) and ('no such file' in probe.stderr.lower() or 'not found' in probe.stderr.lower())
+                print('V2 native check without fixture mount rc='+str(probe.returncode)+' missing_TLS_file='+str(missing),flush=True)
+                need(missing,'unclassified synthetic native check failure')
+            else:
+                print('V2 native check without fixture mount succeeded; checking complete fixture too',flush=True)
+            pos=args.index('--entrypoint')
+            args=args[:pos]+('--mount','type=bind,src='+str(self.w/'acme')+',dst=/acme,readonly')+args[pos:]
+            result=super().cmd(*args,timeout=timeout,data=data)
+            print('V2 PASS native synthetic TLS check with read-only fixture mount',flush=True)
+            return result
         if self.ns:args=('ip','netns','exec',self.ns,*args)
         return super().cmd(*args,timeout=timeout,data=data)
     def verify_legacy_shape(self,f):
