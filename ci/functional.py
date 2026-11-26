@@ -108,15 +108,29 @@ try:
         cid=os.environ[var];pid=inspect(cid,'{{.State.Pid}}');prefix=['nsenter','-t',pid,'-n']
         run(['sysctl','-qw','net.ipv6.conf.'+bridge+'.disable_ipv6=0'])
         run(['ip','-6','addr','add',subnet+'::1/64','dev',bridge,'nodad'])
+        run(['sysctl','-qw','net.ipv6.conf.'+bridge+'.forwarding=1'])
         run(prefix+['sysctl','-qw','net.ipv6.conf.eth0.disable_ipv6=0'])
         run(prefix+['ip','-6','addr','add',subnet+'::2/64','dev','eth0','nodad'])
+        # Host INPUT intentionally drops container-originated Neighbor Discovery.
+        # Seed only the synthetic gateway's real L2 address so a TCP SYN can
+        # reach the FORWARD hook without allowing ND or changing firewall rules.
+        gateway_mac=pathlib.Path('/sys/class/net',bridge,'address').read_text().strip()
+        run(prefix+['ip','-6','neigh','replace',subnet+'::1','lladdr',gateway_mac,'nud','permanent','dev','eth0'])
         run(prefix+['ip','-6','route','add','fd42:198:18::/64','via',subnet+'::1','dev','eth0'])
-        run(prefix+['ip','-6','route','get','fd42:198:18::4'],stdout=subprocess.DEVNULL)
+        route=json.loads(subprocess.check_output(prefix+['ip','-j','-6','route','get','fd42:198:18::4']))
+        if len(route)!=1 or route[0].get('dev')!='eth0' or route[0].get('gateway')!=subnet+'::1':
+            raise RuntimeError(var+' synthetic IPv6 route mismatch')
+        neighbor=json.loads(subprocess.check_output(prefix+['ip','-j','-6','neigh','show','to',subnet+'::1','dev','eth0']))
+        if len(neighbor)!=1 or neighbor[0].get('lladdr')!=gateway_mac or 'PERMANENT' not in neighbor[0].get('state',[]):
+            raise RuntimeError(var+' synthetic IPv6 neighbor mismatch')
         before=ipv6_drop_count()
         probe(prefix,'ipv6','fd42:198:18::4','deny')
-        if ipv6_drop_count()<=before:raise RuntimeError(var+' IPv6 drop not observed in nftables counters')
+        after=ipv6_drop_count()
+        print(var,'IPv6 FORWARD drop counter',before,'->',after,flush=True)
+        if after<=before:raise RuntimeError(var+' IPv6 drop not observed in nftables counters')
         print(var,'active IPv6 FORWARD drop counter PASS',flush=True)
         run(prefix+['ip','-6','route','del','fd42:198:18::/64','via',subnet+'::1','dev','eth0'])
+        run(prefix+['ip','-6','neigh','del',subnet+'::1','dev','eth0'])
         run(prefix+['ip','-6','addr','del',subnet+'::2/64','dev','eth0'])
         run(['ip','-6','addr','del',subnet+'::1/64','dev',bridge])
 finally:
