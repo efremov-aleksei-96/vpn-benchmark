@@ -12,8 +12,8 @@ done
 for n in vb-sbox vb-mita; do
   if grep -Fxq "$n" <<< "$networks"; then echo "FAIL: leaked network $n"; exit 1; fi
 done
-if grep -Fxq 'table inet vpn_benchmark' <<< "$tables"; then echo 'FAIL: leaked firewall table'; exit 1; fi
-if grep -Eq '^(vb-client|vb-flush-test)([[:space:]]|$)' <<< "$namespaces"; then echo 'FAIL: leaked namespace'; exit 1; fi
+if grep -Eq '^table inet (vpn_benchmark|vb2_canary)$' <<< "$tables"; then echo 'FAIL: leaked firewall table'; exit 1; fi
+if grep -Eq '^(vb-client|vb-flush-test|vb-v2-fault)([[:space:]]|$)' <<< "$namespaces"; then echo 'FAIL: leaked namespace'; exit 1; fi
 for n in vb-wan br-vb-sbox br-vb-mita; do
   if grep -Eq "^[0-9]+: ${n}(@[^:]+)?:" <<< "$links"; then echo "FAIL: leaked interface $n"; exit 1; fi
 done
@@ -22,3 +22,8 @@ for command in iptables-legacy-save ip6tables-legacy-save; do
   if grep -Eq '(^:VB15_|-j VB15_|^-A VB15_)' <<< "$saved"; then echo 'FAIL: leaked independent guard'; exit 1; fi
 done
 echo 'PASS: lab resources absent after cleanup'
+
+for command in iptables-legacy-save ip6tables-legacy-save; do
+  saved=$(sudo "$command")
+  if grep -Eq '^:VB2_CANARY|^-A VB2_CANARY' <<< "$saved"; then echo 'FAIL: leaked v2 canary'; exit 1; fi
+done
