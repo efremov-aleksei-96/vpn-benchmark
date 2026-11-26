@@ -42,6 +42,27 @@ jobs:
         run: bash ci/verify-cleanup.sh
       - name: Transactional lifecycle failure matrix
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT env VB_LIFECYCLE_MATRIX=1 bash ci/lab.sh
+      - name: Final cleanup audit
+        if: always()
+        run: bash ci/verify-cleanup.sh
+
+  transaction_v2:
+    if: ${{ github.repository == 'efremov-aleksei-96/vpn-benchmark' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.lab_confirmed)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Static checks
+        run: |
+          bash -n ci/lab.sh
+          bash -n ci/verify-cleanup.sh
+          python3 -m py_compile ci/*.py candidate/*.py ci/transaction_v2/*.py
+          printf '%s\n' '7028ab00ed08b3d7a89adbc5ff41711323a9a990eda4fec8af518fbc26704c6e  ci/transaction_v2/lifecycle.py' 'c96a300abe817ff05b523b2966617453e01199326bb9becfd11a822f1021cedd  ci/transaction_v2/benchmark.py' | sha256sum -c -
+          python3 ci/test_template.py
+          python3 -m json.tool candidate/sing-box.json >/dev/null
+          python3 -m json.tool candidate/mita.json >/dev/null
       - name: Operational Transaction v2 real integration
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT env VB_TRANSACTION_V2=1 bash ci/lab.sh
       - name: Final cleanup audit

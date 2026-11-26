@@ -281,6 +281,10 @@ class Lifecycle:
             self.s['phase']='rolled_back';self.s['pending']=None;self.event('rollback','verified')
         except (Failure,OSError,ValueError,KeyError) as exc:
             self.s['phase']='rollback_incomplete';self.event('rollback','incomplete')
+            # Failure messages are authored static assertions or executable/exit
+            # codes from call(), never raw subprocess output or config values.
+            reason=str(exc) if isinstance(exc,Failure) else type(exc).__name__
+            print('LIFECYCLE rollback diagnostic: '+reason,flush=True)
             raise Incomplete('rollback incomplete; retain existing firewall') from None
     def reconcile_ci(self,stage,reference):
         # Explicit CI-only reconciliation after simulated lost response.
