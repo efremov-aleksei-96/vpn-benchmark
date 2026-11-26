@@ -1,10 +1,9 @@
 import copy, json, os, pathlib, secrets, subprocess, uuid
+from template import render_template
 w=pathlib.Path(os.environ['VB_WORK']); src=pathlib.Path('candidate')
 repl={'__PUBLIC_IPV4__':'198.18.254.1','__WAN_IF__':'vb-wan','__TESTER_IPV4_CIDRS__':'198.18.254.2/32','__VLESS_UUID__':str(uuid.uuid4()),'__REALITY_HOST__':'example.com','__REALITY_PRIVATE_KEY__':os.environ['VB_KEY'],'__REALITY_SHORT_ID__':secrets.token_hex(8),'__NAIVE_PASSWORD__':secrets.token_urlsafe(24),'__MIERU_PASSWORD__':secrets.token_urlsafe(24)}
 for name in ['sing-box.json','mita.json','firewall.nft']:
-    text=(src/name).read_text()
-    for k,v in repl.items(): text=text.replace(k,v)
-    assert '__' not in text, 'unresolved placeholder'
+    text=render_template((src/name).read_text(),repl)
     target=w/('sing-box-acme.json' if name=='sing-box.json' else name);target.write_text(text)
     target.chmod(0o600)
     owner=(int(os.environ['VB_MITA_UID']),int(os.environ['VB_MITA_GID'])) if name=='mita.json' else (65532,65532)
