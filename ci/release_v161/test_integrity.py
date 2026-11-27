@@ -299,4 +299,35 @@ class Integrity(unittest.TestCase):
         self.assertFalse(probe.https_denied(60,b'',token,addr,before,before))
         self.assertFalse(probe.https_denied(0,b'',token,addr,before,before))
         self.assertFalse(probe.https_denied(35,token,token,addr,before,before))
+
+    def test_dns_origin_positive_control_and_no_new_receive(self):
+        for marker in ('DNS_UDP_RECEIVED 198.18.254.6','DNS_TCP_RECEIVED 198.18.254.5'):
+            before=marker+'\n'
+            self.assertTrue(probe.no_new_observation(marker,before,before+'DNS target.test 1\n'))
+            self.assertFalse(probe.no_new_observation(marker,before,before+marker+'\n'))
+            self.assertFalse(probe.no_new_observation(marker,'',''))
+            self.assertFalse(probe.no_new_observation(marker,before,''))
+    def test_dns_requires_exact_synthetic_answer(self):
+        import struct,socket
+        question=b'\x31\x37\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x06target\x04test\x00\x00\x01\x00\x01'
+        answer=question[:2]+struct.pack('!HHHHH',0x8180,1,1,0,0)+question[12:]+b'\xc0\x0c'+struct.pack('!HHIH',1,1,0,4)+socket.inet_aton('198.18.254.4')
+        self.assertTrue(direct.dns_response_valid(question,answer))
+        self.assertFalse(direct.dns_response_valid(question,question+b'\xc6\x12\xfe\x04'))
+        self.assertFalse(direct.dns_response_valid(question,answer[:2]+b'\x81\x83'+answer[4:]))
+    def test_a10_existing_docker_guard_exits(self):
+        import subprocess
+        script=(ROOT/'tests/a10/prepare-guest.sh').read_text()
+        lines=[x for x in script.splitlines() if 'command -v dockerd' in x]
+        self.assertEqual(len(lines),1)
+        for exists in (True,False):
+            r=subprocess.run(['bash','-ec','command(){ return '+('0' if exists else '1')+'; }\n'+lines[0]+'\nprintf REACHED'],capture_output=True,text=True)
+            self.assertEqual(r.returncode,78 if exists else 0)
+            self.assertEqual('REACHED' in r.stdout,not exists)
+    def test_a10_dependency_paths(self):
+        import fnmatch,re
+        s=(ROOT/'.github/workflows/a10.yml').read_text().split('  workflow_dispatch:',1)[0]
+        paths=re.findall(r"^\s+- '([^']+)'",s,re.M)
+        for p in ('ci/release_v161/benchmark.py','ci/release_v161/acceptance.py','ci/release_v161/test_integrity.py','ci/transaction_v2/integration.py','ci/transaction_v2/prepare-docker.sh','ci/transaction_v2/lifecycle.py','ci/render.py','ci/template.py','ci/probe.py','ci/direct.py','ci/test_guard.py','ci/legacy_guard_ci.py','ci/lifecycle.py','candidate/firewall.nft','tests/a10/guest.py'):
+            self.assertTrue(any(fnmatch.fnmatchcase(p,x) for x in paths),p)
+
 if __name__=='__main__':unittest.main(verbosity=2)
