@@ -29,7 +29,11 @@ def check_curl(label,url,expected,proxied=True,blocked_addr=None):
     # Observe origin accepts as well as the client result. The existing
     # positive TCP controls establish that each protected origin is live.
     if origin:time.sleep(.3)
-    result=ok if expected else https_denied(r.returncode,r.stdout,TOKEN,blocked_addr,before,origin.read_text() if origin else '')
+    after=origin.read_text() if origin else ''
+    result=ok if expected else https_denied(r.returncode,r.stdout,TOKEN,blocked_addr,before,after)
+    if origin and not result:
+        marker='TCP_ACCEPT '+blocked_addr
+        print('origin_control='+str(marker in before.splitlines())+' log_append_only='+str(after.startswith(before))+' new_origin_accept='+str(marker in after[len(before):].splitlines())+' token_seen='+str(TOKEN in r.stdout),flush=True)
     print(label,'PASS' if result else 'FAIL','curl_exit',r.returncode,flush=True)
     if not result:raise RuntimeError(label)
 def client(label,good):
@@ -79,6 +83,8 @@ def client(label,good):
 # Positive controls show fixtures are alive independently of the proxies.
 check_curl('HTTPS fixture direct','https://198.18.254.4/direct',True,False)
 probe(ns,'tcp','198.18.254.6','allow')
+# The REALITY decoy is distinct from the authenticated application origin.
+probe(ns,'tcp','198.18.254.5','allow')
 probe(ns,'dns-udp','198.18.254.5','allow')
 probe(ns,'dns-tcp','198.18.254.5','allow')
 probe(ns,'dns-udp','198.18.254.6','allow')

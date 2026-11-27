@@ -22,24 +22,26 @@ anchor='        iifname { "br-vb-sbox", "br-vb-mita" } ip daddr @forbidden4 coun
 assert f.count(anchor)==1
 f=f.replace(anchor, '''        # Synthetic WAN HTTPS and DNS endpoints, never production exceptions.
         iifname { "br-vb-sbox", "br-vb-mita" } oifname "vb-wan" ip daddr 198.18.254.4 tcp dport 443 ct direction original ct state { new, established } counter accept
+        # Separate REALITY handshake decoy; not a proxy destination.
+        iifname "br-vb-sbox" oifname "vb-wan" ip daddr 198.18.254.5 tcp dport 443 ct direction original ct state { new, established } counter accept
         iifname { "br-vb-sbox", "br-vb-mita" } oifname "vb-wan" ip daddr 198.18.254.5 udp dport 53 ct direction original ct state { new, established } counter accept
         iifname { "br-vb-sbox", "br-vb-mita" } oifname "vb-wan" ip daddr 198.18.254.5 tcp dport 53 ct direction original ct state { new, established } counter accept
 '''+anchor)
 # Synthetic allows must receive the same per-packet permit bit as production.
 f=f.replace('counter accept','counter meta mark set meta mark | 0x40000000 accept')
 # Remove general production egress allows in the lab variant. Only local fixtures may be reached.
-f='\n'.join(line for line in f.splitlines() if not ('oifname "vb-wan"' in line and ('ip daddr 1.1.1.1' in line or ('tcp dport 443' in line and 'ip daddr 198.18.254.4' not in line))))+'\n'
+f='\n'.join(line for line in f.splitlines() if not ('oifname "vb-wan"' in line and ('ip daddr 1.1.1.1' in line or ('tcp dport 443' in line and not any('ip daddr '+ip+' tcp dport 443' in line for ip in ('198.18.254.4','198.18.254.5'))))))+'\n'
 (w/'firewall.nft').write_text(f)
 s=json.loads((w/'sing-box-lab.json').read_text())
 s['dns']['servers'][0]['server']='198.18.254.5'
 s['inbounds'][0]['tls']['server_name']='target.test'
-s['inbounds'][0]['tls']['reality']['handshake']['server']='198.18.254.4'
+s['inbounds'][0]['tls']['reality']['handshake']['server']='198.18.254.5'
 # Resolve first, then permit precisely the synthetic TLS target.
 s['route']['rules'].insert(1,{'ip_cidr':['198.18.254.4/32'],'port':443,'network':'tcp','action':'route','outbound':'direct'})
 (w/'sing-box-lab.json').write_text(json.dumps(s))
 (w/'resolv.conf').write_text('nameserver 198.18.254.5\noptions timeout:2 attempts:1\n')
 (w/'resolv.conf').chmod(0o644)
-subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=target.test','-addext','subjectAltName=DNS:target.test,DNS:*.target.test,DNS:internal.test,IP:198.18.254.4,IP:198.18.254.6,IP:172.30.241.1,IP:172.30.242.1','-keyout',str(w/'target.key'),'-out',str(w/'target.pem')],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=target.test','-addext','subjectAltName=DNS:target.test,DNS:*.target.test,DNS:internal.test,IP:198.18.254.4,IP:198.18.254.5,IP:198.18.254.6,IP:172.30.241.1,IP:172.30.242.1','-keyout',str(w/'target.key'),'-out',str(w/'target.pem')],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 # Certificate is public test material, private keys remain 0600.
 (w/'target.pem').chmod(0o644); (w/'cert.pem').chmod(0o644)
 clients=w/'clients'; clients.mkdir(mode=0o700); os.chown(clients,65532,65532)

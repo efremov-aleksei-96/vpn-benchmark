@@ -24,7 +24,17 @@ if [[ $(docker version --format '{{.Server.Version}}') != "$target" || $(docker 
   chmod 755 "$source_dir"
   printf 'deb [arch=amd64 signed-by=%s] https://download.docker.com/linux/ubuntu noble stable\n' "$key" > "$source_dir/docker.list"
   opts=(-o "Dir::Etc::sourcelist=$source_dir/docker.list" -o 'Dir::Etc::sourceparts=-' -o 'APT::Get::List-Cleanup=0')
-  apt-get "${opts[@]}" update
+  # Signed index/CDN synchronization can transiently fail. Retry the
+  # complete authenticated update; never install using a failed update.
+  updated=0
+  for attempt in 1 2 3; do
+    if apt-get "${opts[@]}" -o APT::Update::Error-Mode=any update; then
+      updated=1; break
+    fi
+    echo "Docker signed index update failed attempt=$attempt" >&2
+    if ((attempt < 3)); then sleep "$((attempt*5))"; fi
+  done
+  [[ $updated == 1 ]] || { echo 'Docker signed index unavailable after bounded retry' >&2; exit 100; }
   # Exact signed version; fail rather than substitute an unreviewed package.
   apt-cache "${opts[@]}" madison docker-ce docker-ce-cli
   DEBIAN_FRONTEND=noninteractive apt-get "${opts[@]}" install -y --no-install-recommends --allow-downgrades "docker-ce=$version" "docker-ce-cli=$version"

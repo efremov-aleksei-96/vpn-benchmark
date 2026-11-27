@@ -57,7 +57,7 @@ ctx.load_cert_chain(w/'target.pem',w/'target.key');ctx.set_alpn_protocols(['h2',
 servers=[]
 if mode=='wan':
     servers.append(ThreadTCP6(('fd42:198:18::4',443),Canary))
-    for addr in ('198.18.254.4','198.18.254.6'): servers.append(TLSServer((addr,443),HTTP))
+    for addr in ('198.18.254.4','198.18.254.5','198.18.254.6'): servers.append(TLSServer((addr,443),HTTP))
     for addr in ('198.18.254.5','198.18.254.6'):
         servers += [ThreadUDP((addr,53),Udp),ThreadTCP((addr,53),Tcp)]
 elif mode=='host':

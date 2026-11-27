@@ -330,4 +330,27 @@ class Integrity(unittest.TestCase):
         for p in ('ci/release_v161/benchmark.py','ci/release_v161/acceptance.py','ci/release_v161/test_integrity.py','ci/transaction_v2/integration.py','ci/transaction_v2/prepare-docker.sh','ci/transaction_v2/lifecycle.py','ci/render.py','ci/template.py','ci/probe.py','ci/direct.py','ci/test_guard.py','ci/legacy_guard_ci.py','ci/lifecycle.py','candidate/firewall.nft','tests/a10/guest.py'):
             self.assertTrue(any(fnmatch.fnmatchcase(p,x) for x in paths),p)
 
+
+    def test_reality_decoy_and_application_origin_are_distinct(self):
+        render=(ROOT/'ci/render.py').read_text()
+        import ast
+        tree=ast.parse(render)
+        assignment=next(n for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(x,ast.Subscript) and ast.unparse(x)=="s['inbounds'][0]['tls']['reality']['handshake']['server']" for x in n.targets))
+        self.assertEqual(ast.literal_eval(assignment.value),'198.18.254.5')
+        self.assertIn("'ip_cidr':['198.18.254.4/32']",render)
+        self.assertIn('iifname "br-vb-sbox" oifname "vb-wan" ip daddr 198.18.254.5 tcp dport 443',render)
+        # Actual denial predicate ignores decoy traffic but rejects origin traffic.
+        marker='TCP_ACCEPT 198.18.254.4\n'
+        self.assertTrue(probe.https_denied(35,b'',b'fixture','198.18.254.4',marker,marker+'TCP_ACCEPT 198.18.254.5\n'))
+        self.assertFalse(probe.https_denied(35,b'',b'fixture','198.18.254.4',marker,marker+marker))
+    def test_signed_index_retry_never_installs_after_failure(self):
+        import subprocess
+        script=(ROOT/'ci/transaction_v2/prepare-docker.sh').read_text()
+        fragment=script[script.index('  updated=0'):script.index('  # Exact signed version;')]
+        for succeed_on,expected_calls,expected_rc in ((1,1,0),(2,2,0),(4,3,100)):
+            command="opts=(); calls=0\napt-get(){ ((calls+=1)); echo CALL; [[ $calls -ge "+str(succeed_on)+" ]]; }\nsleep(){ :; }\n"+fragment+"\necho INSTALL\n"
+            result=subprocess.run(['bash','-ec',command],capture_output=True,text=True)
+            self.assertEqual(result.returncode,expected_rc)
+            self.assertEqual(result.stdout.splitlines().count('CALL'),expected_calls)
+            self.assertEqual('INSTALL' in result.stdout,expected_rc==0)
 if __name__=='__main__':unittest.main(verbosity=2)
