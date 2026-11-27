@@ -14,7 +14,7 @@ def legacy_count(chain,prefix=()):
     return sum(int(a[0]) for line in raw.splitlines() if (a:=line.split()) and len(a)>2 and a[0].isdigit() and a[2]=='DROP')
 def nft_count(chain):
     rules=json.loads(call(['nft','-j','list','chain','inet','vpn_benchmark',chain]))['nftables']
-    return sum(e.get('counter',{}).get('packets',0) for item in rules for e in item.get('rule',{}).get('expr',[]))
+    return sum(e.get('counter',{}).get('packets',0) for item in rules if any('drop' in x for x in item.get('rule',{}).get('expr',[])) for e in item.get('rule',{}).get('expr',[]))
 def proxy_fallback(counter):
     # Remove exactly one Docker DNAT rule only inside the disposable VM.
     # This forces an actual published listener through INPUT, not FORWARD.

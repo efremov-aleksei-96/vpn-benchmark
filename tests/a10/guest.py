@@ -23,7 +23,7 @@ def inspect(t):
     for i in (0,1):h.verify_network(i,t.s)
     return out
 def before(work):
-    w=WORK;need(not os.path.lexists(w),'fixed work directory exists');w.mkdir(mode=0o700)
+    w=WORK;need(not os.path.lexists(w),'fixed work directory exists');rc.initialize_lock();w.mkdir(mode=0o700)
     uid=int(os.environ['VB_MITA_UID']);gid=int(os.environ['VB_MITA_GID'])
     copy_owned(work/'mita.json',w/'mita.json',uid,gid,0o600)
     copy_owned(work/'firewall.nft',w/'firewall.nft',0,0,0o600)
@@ -88,31 +88,25 @@ def before(work):
         h=rc.Host(m)
         print(a.cli('preflight'),flush=True);print(a.cli('apply'),flush=True)
         s=a.state();need(s['local_ready'] and s['containers']==2 and s['networks']==2,'not ready before reboot')
-        a.ingress('allow');a.ingress('deny','198.18.254.3')
+        a.ingress('allow');a.filtered_ingress()
         t=rc.load(h,m,True);t.guard()
         rows=inspect(t);need(all(x['running'] for x in rows.values()),'not running before reboot')
-        save(w/'a10-before.json',{'boot':rc.boot_id(),'journal_sha':sha(w/'journal.json'),'metadata_sha':sha(w/'fixture.json'),'files':m['files'],'containers':rows,'networks':t.s['networks'],'table':t.s['table'],'legacy':t.s['legacy']})
+        save(w/'a10-before.json',{'boot':rc.boot_id(),'lock_inode':rc.LOCK.stat().st_ino,'journal_sha':sha(w/'journal.json'),'metadata_sha':sha(w/'fixture.json'),'files':m['files'],'containers':rows,'networks':t.s['networks'],'table':t.s['table'],'legacy':t.s['legacy']})
         os.sync()
         print('A10 BEFORE PASS active endpoints, both guards, positive/negative probes, durable snapshot',flush=True)
 def after():
     w=WORK;m=rc.metadata();prior=rc.read_json(w/'a10-before.json')
     need(rc.boot_id()!=prior['boot'],'boot ID did not change')
     need(sha(w/'journal.json')==prior['journal_sha'] and sha(w/'fixture.json')==prior['metadata_sha'] and rc.fingerprints(m)==prior['files'],'persistent files changed')
-    need(not (w/'journal.tmp').exists(),'unexpected temporary journal')
+    need(not rc.interrupted_paths(w/'journal.json'),'unexpected interrupted journal')
     h=rc.Host(m);t=rc.load(h,m,True);rows=inspect(t)
     need(set(rows)==set(prior['containers']) and t.s['networks']==prior['networks'],'owned inventory changed')
     for name,x in rows.items():
         need(x['id']==prior['containers'][name]['id'] and not x['running'] and x['started']==prior['containers'][name]['started'],'endpoint started after reboot')
-    # /run lock is volatile. First exercise the unchanged CLI as-is.
-    if not rc.LOCK.exists():
-        a.cli('status',False)
-        print('A10 observed status refusal: volatile lock absent after reboot',flush=True)
-        # Explicit test harness initialization of empty lock, not a deployment
-        # action and not a journal edit. Candidate itself remains unchanged.
-        with rc.lock():pass
-        print('A10 test-only lock initialization; standalone postboot status gap remains',flush=True)
+    # The candidate must provide its own persistent lock, not test repair.
+    need(rc.LOCK.stat().st_ino==prior['lock_inode'],'persistent lock identity changed')
     s=a.state()
-    need(not s['boot_same'] and not s['local_ready'] and s['containers']==2,'stale boot accepted as ready')
+    need(not s['boot_same'] and s['config_ok'] and not s['local_ready'] and s['recovery_required'] and s['containers']==2,'stale boot accepted as ready')
     need(sha(w/'journal.json')==prior['journal_sha'],'status wrote journal')
     print('A10 observed firewall primary='+str(s['primary_present'])+' legacy4='+s['legacy4']+' legacy6='+s['legacy6'],flush=True)
     # Actual endpoint probes, not simply absence of the old veth. Recreate
@@ -141,25 +135,29 @@ def after():
         if stable>=4:break
     else:raise RuntimeError('postboot probe fixture unstable')
     # Confirm path to host by ARP/neighbour and IP-level ping before negatives.
-    call('ip','netns','exec',CLIENT,'ping','-c','1','-W','3',IP)
+    for src in ('198.18.254.2','198.18.254.3'):
+        call('ip','netns','exec',CLIENT,'ping','-I',src,'-c','1','-W','3',IP)
     a.ingress('deny');a.ingress('deny','198.18.254.3')
     for p in (80,):
         print(call('ip','netns','exec',CLIENT,sys.executable,str(ROOT/'ci/probe.py'),'198.18.254.2',IP,str(p),'deny'),flush=True)
     need(not any(line.split()[3].rsplit(':',1)[-1] in ('80','18443','18444','18445') for line in call('ss','-H','-lnt').splitlines()),'unexpected experiment listener')
-    a.cli('apply',False);a.cli('start',False)
+    a.cli('apply','JOURNAL_EXISTS');a.cli('start','START_DISABLED')
     need(sha(w/'journal.json')==prior['journal_sha'],'refused activation modified journal')
     # A missing guard is a refusal, not an automatic repair. Only the tested
     # CLI may remove known owned objects; check that no remaining guard changes.
-    original={f:h.legacy_fingerprint(f) for f in (4,6)}
-    primary=h.table_fingerprint(t.s['run'])
-    if s['primary_present'] or any(x is not None for x in original.values()):
-        need(s['primary_present']==(primary is not None),'foreign primary after reboot')
-    # The existing CLI may complete rollback if ALL expected guards survive;
-    # normally they disappear and must cause rollback_incomplete.
-    if primary!=t.s['table'] or any(original[f]!=t.s['legacy'].get(str(f)) for f in (4,6)):
-        a.cli('rollback',False)
+    def legacy_snapshot():
+        return {f:[h.cmd(h.legacy_binary(f),'-t',table,'-S') for table in (('mangle','filter') if f==4 else ('filter',))] for f in (4,6)}
+    original={}
+    for f in (4,6):
+        try:original[f]=h.legacy_fingerprint(f)
+        except Failure:original[f]='unverified'
+    exists=h.table_exists();primary=h.table_fingerprint(t.s['run'])
+    primary_raw=h.cmd('nft','-s','list','table','inet','vpn_benchmark') if exists else None
+    legacy_raw=legacy_snapshot()
+    if not a.rollback_can_complete(exists,primary,t.s['table'],original,t.s['legacy'],bool(t.s['uncertain'] or t.s['pending'])):
+        a.cli('rollback','RECOVERY_REQUIRED')
         result=a.state();need(result['phase']=='rollback_incomplete','guard mismatch not retained as incomplete')
-        need(h.table_fingerprint(t.s['run'])==primary and all(h.legacy_fingerprint(f)==original[f] for f in (4,6)),'remaining protection modified')
+        need(h.table_exists()==exists and (not exists or h.cmd('nft','-s','list','table','inet','vpn_benchmark')==primary_raw) and legacy_snapshot()==legacy_raw,'remaining protection modified')
     else:
         print(a.cli('rollback'),flush=True);a.no_resources(h,t.s['run'])
     a.ingress('deny')

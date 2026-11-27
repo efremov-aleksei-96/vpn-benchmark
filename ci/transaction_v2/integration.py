@@ -249,7 +249,10 @@ def normal(work):
             for port in (18443,18444,18445):
                 print(call('ip','netns','exec',CLIENT,sys.executable,'ci/probe.py',src,IP,str(port),expected),flush=True)
         try:
-            ingress('allow');ingress('deny','198.18.254.3')
+            from test_guard import nft_count,legacy_count
+            ingress('allow');before=nft_count('forward')
+            ingress('deny','198.18.254.3')
+            need(nft_count('forward')>before,'primary FORWARD drop not observed')
             primary=w/('firewall-'+t.s['run']+'.nft');h.remove_table()
             try:
                 need(not h.table_exists(),'primary still present');t.verify_legacy(complete=True)
@@ -257,9 +260,9 @@ def normal(work):
                 try:t.guard()
                 except Failure:pass
                 else:raise Failure('guard accepted absent primary')
-                before=h.cmd('iptables-legacy','-t','filter','-L','VB15_FWD','-v','-x','-n')
+                before=legacy_count('VB15_FWD')
                 ingress('deny')
-                need(before!=h.cmd('iptables-legacy','-t','filter','-L','VB15_FWD','-v','-x','-n'),'independent counter unchanged')
+                need(legacy_count('VB15_FWD')>before,'independent DROP counter did not increase')
                 print('V2 PASS live containers fail closed after primary loss',flush=True)
             finally:
                 if not h.table_exists():h.cmd('nft','-f',str(primary))

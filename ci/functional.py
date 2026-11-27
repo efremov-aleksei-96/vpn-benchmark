@@ -82,7 +82,7 @@ for var,peer in [('VB_C1','172.30.242.2'),('VB_C2','172.30.241.2')]:
     # Verify no routable IPv6 configuration in the actual disabled-IPv6 network.
     addresses=run(prefix+['ip','-6','addr','show','scope','global'],stdout=subprocess.PIPE,text=True).stdout
     if addresses.strip():raise RuntimeError('unexpected global IPv6 address')
-    probe(prefix,'ipv6','fd42:198:18::4','deny')
+    probe(prefix,'ipv6','fd42:198:18::4','isolated')
     print(var,'IPv6 no-global-address and connect failure PASS (not proof of packet-filter rule)',flush=True)
 for label in ('raw','mieru','naive'):
     client(label,True);client(label,False)

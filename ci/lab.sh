@@ -101,7 +101,10 @@ PY
 [[ $C1 =~ ^[0-9a-f]{64}$ && $C2 =~ ^[0-9a-f]{64}$ ]]
 for port in 18443 18444 18445; do
   ip netns exec vb-client python3 ci/probe.py 198.18.254.2 198.18.254.1 "$port" allow
+  before=$(PYTHONPATH=ci python3 -c 'from test_guard import nft_count;print(nft_count("forward"))')
   ip netns exec vb-client python3 ci/probe.py 198.18.254.3 198.18.254.1 "$port" deny
+  after=$(PYTHONPATH=ci python3 -c 'from test_guard import nft_count;print(nft_count("forward"))')
+  ((after > before))
 done
 ip -n vb-client addr add 198.18.254.4/29 dev vb-peer
 ip -n vb-client addr add 198.18.254.5/29 dev vb-peer

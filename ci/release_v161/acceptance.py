@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hosted-only v1.6.1 acceptance. Test-only reconciliation is not a live API."""
+"""Hosted-only v1.6.2 acceptance. Test-only reconciliation is not a live API."""
 import importlib.util,json,os,pathlib,signal,subprocess,sys,time
 HERE=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('release_v161',HERE/'benchmark.py')
@@ -8,11 +8,13 @@ lab=rc.lab
 from integration import call,need,copy_owned,no_ns,IP,WAN,CLIENT,canaries
 from lifecycle import Failure,save
 WORK=rc.WORK
-def cli(action,ok=True):
+def cli(action,reason=None):
     p=subprocess.run([sys.executable,str(HERE/'benchmark.py'),action],capture_output=True,text=True,timeout=180)
-    if ok and p.returncode:raise Failure('CLI '+action+' failed: '+p.stderr.strip())
-    if not ok:need(p.returncode==78,'expected refusal: '+action)
+    if reason is None:need(p.returncode==0,'CLI '+action+' failed: '+p.stderr.strip())
+    else:need(p.returncode==78 and p.stderr.startswith('RC REFUSED '+reason+':'),'unexpected refusal: '+action+' expected '+reason)
     return p.stdout.strip()
+def rollback_can_complete(exists,primary,expected,legacy,recorded,uncertain=False):
+    return not uncertain and (not exists or (primary is not None and primary==expected)) and all(legacy[f]==recorded.get(str(f)) for f in (4,6))
 def report(id,msg):print(id+' PASS '+msg,flush=True)
 def journal():return rc.read_json(WORK/'journal.json')
 def state():return json.loads(cli('status'))
@@ -32,46 +34,55 @@ def killed(fn):
     _,st=os.waitpid(pid,0)
     need(os.WIFSIGNALED(st) and os.WTERMSIG(st)==signal.SIGKILL,'real SIGKILL checkpoint not reached')
 def atomic_tests():
-    p=WORK/'atomic-test.json';save(p,{'step':'old'})
+    p=WORK/'atomic-test.json';rc.save_journal(p,{'step':'old'})
     def before():
         os.replace=lambda a,b:kill()
-        save(p,{'step':'new'})
+        rc.save_journal(p,{'step':'new'})
     killed(before)
     need(json.loads(p.read_text())=={'step':'old'} and json.loads(p.with_suffix('.tmp').read_text())=={'step':'new'},'before-replace evidence wrong')
+    need(rc.journal_marker(p).exists(),'before-replace witness missing')
     os.rename(p.with_suffix('.tmp'),WORK/'atomic-before-evidence.json')
+    os.rename(rc.journal_marker(p),WORK/'atomic-before-witness')
     def after():
         original=os.replace
         def f(a,b):original(a,b);kill()
-        os.replace=f;save(p,{'step':'new'})
+        os.replace=f;rc.save_journal(p,{'step':'new'})
     killed(after)
     need(json.loads(p.read_text())=={'step':'new'} and not p.with_suffix('.tmp').exists(),'after-replace state wrong')
-    report('A02','SIGKILL before and after atomic replace, not power loss')
+    need(rc.journal_marker(p).exists(),'after-replace witness missing')
+    os.rename(rc.journal_marker(p),WORK/'atomic-after-witness')
+    report('A02','SIGKILL before and after atomic replace; witness retained, not power loss')
 def no_resources(h,run):
     h.verify_absence(run);need(not h.table_exists() and all(h.legacy_fingerprint(f) is None for f in (4,6)),'guard remains')
 def ingress(expected,src='198.18.254.2'):
     for port in (18443,18444,18445):
         print(call('ip','netns','exec',CLIENT,sys.executable,'ci/probe.py',src,IP,str(port),expected),flush=True)
+def filtered_ingress():
+    from test_guard import nft_count
+    before=nft_count('forward')
+    ingress('deny','198.18.254.3')
+    need(nft_count('forward')>before,'primary FORWARD drop not observed')
 def normal_tests(m,h):
     lab.sources()
     env=dict(os.environ);env.pop('GITHUB_ACTIONS',None);env.pop('RUNNER_ENVIRONMENT',None)
     p=subprocess.run([sys.executable,str(HERE/'benchmark.py'),'apply'],env=env,capture_output=True)
-    need(p.returncode==78,'new CLI not sealed outside lab')
+    need(p.returncode==78 and p.stderr.startswith(b'RC REFUSED LAB_REQUIRED:'),'new CLI not sealed outside lab')
     report('A12','sealed base hashes and live locks; RC refuses non-CI execution')
     atomic_tests()
     with rc.lock():
-        cli('apply',False);need(not (WORK/'journal.json').exists(),'competing apply wrote journal')
+        cli('apply','LOCK_BUSY');need(not (WORK/'journal.json').exists(),'competing apply wrote journal')
     report('A01','competing apply denied while exclusive lock held')
     p=WORK/'sing-box.json';old=p.read_bytes();p.write_bytes(old+b'\n')
-    try:cli('apply',False);need(not (WORK/'journal.json').exists(),'drift accepted before apply')
+    try:cli('apply','CONFIG_DRIFT');need(not (WORK/'journal.json').exists(),'drift accepted before apply')
     finally:p.write_bytes(old)
     print(cli('preflight'),flush=True);print(cli('apply'),flush=True)
     s=state();need(s['phase']=='local_ready_external_pending' and s['local_ready'] and s['containers']==2 and s['networks']==2,'CLI not ready')
-    ingress('allow');ingress('deny','198.18.254.3')
+    ingress('allow');filtered_ingress()
     j=WORK/'journal.json';before=(j.read_bytes(),j.stat().st_mtime_ns)
     state();need((j.read_bytes(),j.stat().st_mtime_ns)==before,'status changed journal')
     report('A06','status read-only on active journal')
     p.write_bytes(old+b'\n');s=state();need(not s['config_ok'] and not s['local_ready'],'status missed drift')
-    cli('start',False);print(cli('stop'),flush=True);ingress('deny')
+    cli('start','START_DISABLED');print(cli('stop'),flush=True);ingress('deny')
     print(cli('rollback'),flush=True);no_resources(h,journal()['run'])
     report('A05','drift blocks apply and ready status; stop and rollback work')
     report('A07','real preflight/apply/status/stop/rollback')
@@ -81,15 +92,16 @@ def normal_tests(m,h):
     p.write_bytes(old)
     def interrupted():
         os.replace=lambda a,b:kill()
-        save(j,dict(journal(),phase='untrusted_tmp'))
+        rc.save_journal(j,dict(journal(),phase='untrusted_tmp'))
     killed(interrupted)
     tmp=j.with_suffix('.tmp');raw=tmp.read_bytes()
     before=(j.read_bytes(),j.stat().st_mtime_ns,tmp.read_bytes(),tmp.stat().st_mtime_ns)
     need(state()['interrupted_write'],'status missed stale tmp')
     need((j.read_bytes(),j.stat().st_mtime_ns,tmp.read_bytes(),tmp.stat().st_mtime_ns)==before,'status modified interrupted evidence')
-    cli('rollback',False)
+    marker=rc.journal_marker(j);need(marker.exists(),'interrupted witness missing')
+    cli('rollback','RECOVERY_REQUIRED')
     ev=list(WORK.glob('journal.interrupted-*'))
-    need(len(ev)==1 and ev[0].read_bytes()==raw and not tmp.exists() and 'journal_write_interrupted' in journal()['uncertain'] and journal()['phase']=='rollback_incomplete','interrupted evidence not preserved')
+    need(len(ev)==2 and sorted(x.read_bytes() for x in ev)==sorted([raw,b'']) and not tmp.exists() and not marker.exists() and 'journal_write_interrupted' in journal()['uncertain'] and journal()['phase']=='rollback_incomplete','interrupted evidence not preserved')
     no_resources(h,journal()['run']);report('A04','stale tmp preserved, never promoted; uncertainty retained')
     preserve('interrupted')
 def docker_restart(m,h):
@@ -125,8 +137,8 @@ def crash_case(m,h,case):
     expected='legacy:4' if case=='legacy4' else 'network:vb-sbox'
     need(state()['pending']==expected,'wrong durable pending stage')
     before=(WORK/'journal.json').read_bytes()
-    cli('apply',False);need((WORK/'journal.json').read_bytes()==before,'uncertain apply replayed')
-    cli('rollback',False);t=rc.load(h,m,True)
+    cli('apply','JOURNAL_EXISTS');need((WORK/'journal.json').read_bytes()==before,'uncertain apply replayed')
+    cli('rollback','RECOVERY_REQUIRED');t=rc.load(h,m,True)
     need(expected in t.s['uncertain'] and t.s['phase']=='rollback_incomplete','uncertainty lost')
     need(not h.inventory('container',t.s['run']),'unexpected endpoint')
     # This cleanup is ONLY for the controlled test injection. No journal adoption.
@@ -149,7 +161,7 @@ def crash_case(m,h,case):
     report('A03','SIGKILL after actual '+case+' mutation; no replay; retained protection; test-only cleanup')
     preserve('sigkill-'+case)
 def acceptance(work):
-    w=WORK;need(not os.path.lexists(w),'fixed work directory exists');w.mkdir(mode=0o700)
+    w=WORK;need(not os.path.lexists(w),'fixed work directory exists');rc.initialize_lock();w.mkdir(mode=0o700)
     uid=int(os.environ['VB_MITA_UID']);gid=int(os.environ['VB_MITA_GID'])
     copy_owned(work/'mita.json',w/'mita.json',uid,gid,0o600)
     copy_owned(work/'firewall.nft',w/'firewall.nft',0,0,0o600)

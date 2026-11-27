@@ -161,5 +161,21 @@ for ((i=0;i<120;i++)); do
 done
 [[ $changed == 1 ]]
 echo 'A10 independent outer-runner boot ID comparison PASS'
-remote 'sudo systemctl is-active --quiet docker && cd /opt/vb-a10 && sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted python3 tests/a10/guest.py after'
+# SSH and boot_id may be ready before the Docker unit/API. Observe only;
+# never start or restart Docker from this test.
+deadline=$((SECONDS+120))
+docker_ready=0
+while ((SECONDS < deadline)); do
+  if version=$(timeout 10 ssh "${sshopt[@]}" -p 22222 ubuntu@127.0.0.1 'sudo systemctl is-active --quiet docker && sudo timeout 5 docker --host unix:///var/run/docker.sock version --format "{{.Server.Version}} {{.Server.APIVersion}}"' 2>/dev/null) && [[ $version == '29.1.3 1.52' ]]; then
+    docker_ready=1;break
+  fi
+  sleep 2
+done
+if [[ $docker_ready != 1 ]]; then
+  echo 'A10 Docker readiness timeout'
+  timeout 10 ssh "${sshopt[@]}" -p 22222 ubuntu@127.0.0.1 'systemctl show docker -p ActiveState -p SubState -p Result' || true
+  exit 1
+fi
+echo 'A10 Docker unit and local API ready PASS'
+remote 'cd /opt/vb-a10 && sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted python3 tests/a10/guest.py after'
 echo 'A10 outer runner PASS; VM will be destroyed'
