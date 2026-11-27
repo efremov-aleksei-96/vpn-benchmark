@@ -5,7 +5,7 @@ HERE=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('release_v161',HERE/'benchmark.py')
 rc=importlib.util.module_from_spec(spec);spec.loader.exec_module(rc)
 lab=rc.lab
-from integration import call,need,copy_owned,no_ns,IP,WAN,CLIENT,canaries
+from integration import call,need,copy_owned,no_ns,IP,WAN,CLIENT,canaries,configure_fixture
 from lifecycle import Failure,save
 WORK=rc.WORK
 def cli(action,reason=None):
@@ -179,52 +179,7 @@ def acceptance(work):
     try:
         call('ip','link','add',WAN,'type','veth','peer','name','vb-peer','netns',CLIENT)
         original=json.loads(call('ip','-j','link','show','dev',WAN))[0]['ifindex']
-        for dev in ('lo','vb-peer'):call('ip','-n',CLIENT,'link','set',dev,'up')
-        call('ip','link','set',WAN,'up')
-        # Wait for both ends to have carrier before assigning the synthetic addresses.
-        for _ in range(30):
-            link=json.loads(call('ip','-j','link','show','dev',WAN))[0]
-            need(link['ifindex']==original,'fixture link replaced')
-            if 'LOWER_UP' in link['flags']:break
-            time.sleep(.1)
-        else:raise Failure('synthetic veth carrier missing')
-        for ip in ('198.18.254.2','198.18.254.3'):call('ip','-n',CLIENT,'addr','add',ip+'/29','dev','vb-peer')
-        call('ip','addr','add',IP+'/29','dev',WAN)
-        # Only during fixture creation: allow async link setup to settle, then
-        # verify exact address and identity. No address repair after apply starts.
-        def verify_fixture():
-            host=json.loads(call('ip','-j','-4','addr','show','dev',WAN))
-            peer=json.loads(call('ip','-n',CLIENT,'-j','-4','addr','show','dev','vb-peer'))
-            print('V2 fixture readback WAN='+str([(r['ifindex'],r.get('flags'),[(a.get('local'),a.get('prefixlen')) for a in r.get('addr_info',[])]) for r in host])+' peer='+str([(r['ifindex'],[(a.get('local'),a.get('prefixlen')) for a in r.get('addr_info',[])]) for r in peer]),flush=True)
-            need(len(host)==1 and host[0]['ifindex']==original and 'LOWER_UP' in host[0]['flags'] and any(a.get('local')==IP and a.get('prefixlen')==29 for a in host[0].get('addr_info',[])),'fixture WAN address/identity lost')
-            need(len(peer)==1 and {'198.18.254.2','198.18.254.3'}<={a['local'] for a in peer[0].get('addr_info',[]) if a.get('prefixlen')==29},'tester addresses missing')
-            need(not call('ip','-n',CLIENT,'route','show','default') and not call('ip','-n',CLIENT,'-6','route','show','default'),'unexpected default route')
-        # Recover only a missing address on the same owned link before any
-        # Transaction exists. Never repair a running deployment or a replaced link.
-        # Repeated loss is a failure, not an ignored guard.
-        stable=0
-        repairs=0
-        for attempt in range(15):
-            link=json.loads(call('ip','-j','link','show','dev',WAN))
-            need(len(link)==1 and link[0]['ifindex']==original and 'LOWER_UP' in link[0]['flags'],'fixture link identity/carrier lost')
-            host=json.loads(call('ip','-j','-4','addr','show','dev',WAN))
-            present=len(host)==1 and any(a.get('local')==IP and a.get('prefixlen')==29 for a in host[0].get('addr_info',[]))
-            if not present:
-                need(not host or (len(host)==1 and host[0]['ifindex']==original and not host[0].get('addr_info')),'unexpected WAN address state')
-                repairs+=1
-                need(repairs<=2,'fixture WAN repeatedly loses address')
-                print('V2 fixture missing IPv4 before transaction; reassigning once per observed loss, attempt='+str(repairs),flush=True)
-                # No address flush or route changes. Only the absent synthetic address.
-                call('ip','addr','add',IP+'/29','dev',WAN)
-                stable=0
-            else:
-                verify_fixture()
-                stable+=1
-                if stable>=4:break
-            time.sleep(.5)
-        else:raise Failure('fixture WAN did not stabilize')
-        print('V2 fixture stable; repairs='+str(repairs),flush=True)
-
+        configure_fixture(original,ns_inode,'RC')
         m={'uid':uid,'gid':gid,'sbox':os.environ['VB_SBOX_IMAGE'],'mita':os.environ['VB_MITA_IMAGE'],'ifindex':original,'boot_id':rc.boot_id()}
         m['files']=rc.fingerprints(m);save(w/'fixture.json',m)
         h=rc.Host(m);baseline=canaries(h,True)

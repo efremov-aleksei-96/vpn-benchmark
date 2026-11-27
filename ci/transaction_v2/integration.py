@@ -181,6 +181,53 @@ def faults(work):
     print('V2 FIREWALL FAULT MATRIX PASS 13/13',flush=True)
 def copy_owned(src,dst,uid,gid,mode):
     shutil.copyfile(src,dst);os.chown(dst,uid,gid);dst.chmod(mode)
+def configure_fixture(original,ns_inode,label='V2'):
+    # Only newly created CI transport; never repair during a transaction.
+    peer_index=json.loads(call('ip','-n',CLIENT,'-j','link','show','dev','vb-peer'))[0]['ifindex']
+    def identity():
+        need(os.stat('/run/netns/'+CLIENT).st_ino==ns_inode,'fixture namespace replaced')
+    def links():
+        identity()
+        host=json.loads(call('ip','-j','addr','show','dev',WAN))
+        peer=json.loads(call('ip','-n',CLIENT,'-j','addr','show','dev','vb-peer'))
+        need(len(host)==1 and host[0]['ifindex']==original and len(peer)==1 and peer[0]['ifindex']==peer_index,'fixture link identity changed')
+        return host[0],peer[0]
+    for dev in ('lo','vb-peer'):call('ip','-n',CLIENT,'link','set',dev,'up')
+    call('ip','link','set',WAN,'up')
+    for _ in range(30):
+        host,peer=links()
+        if 'LOWER_UP' in host['flags'] and 'LOWER_UP' in peer['flags']:break
+        time.sleep(.1)
+    else:raise Failure('synthetic veth carrier missing')
+    for ip in ('198.18.254.2','198.18.254.3'):call('ip','-n',CLIENT,'addr','add',ip+'/29','dev','vb-peer')
+    call('ip','addr','add',IP+'/29','dev',WAN)
+    def addresses():
+        host,peer=links()
+        def ipv4(row):return {(x.get('local'),x.get('prefixlen')) for x in row.get('addr_info',[]) if x.get('family')=='inet'}
+        need('LOWER_UP' in host['flags'] and 'LOWER_UP' in peer['flags'],'fixture carrier lost')
+        need(ipv4(peer)=={('198.18.254.2',29),('198.18.254.3',29)},'tester address mismatch')
+        need(not call('ip','-n',CLIENT,'route','show','default') and not call('ip','-n',CLIENT,'-6','route','show','default'),'unexpected default route')
+        return ipv4(host)
+    stable=0;repairs=0
+    for _ in range(15):
+        current=addresses()
+        print(label+' fixture readback WAN='+str(sorted(current))+' stable='+str(stable),flush=True)
+        if not current:
+            repairs+=1;need(repairs<=2,'fixture WAN repeatedly loses address')
+            current=addresses()
+            if not current:
+                call('ip','addr','add',IP+'/29','dev',WAN)
+                print(label+' fixture IPv4 repair='+str(repairs),flush=True)
+            else:need(current=={(IP,29)},'unexpected WAN address')
+            stable=0
+        else:
+            need(current=={(IP,29)},'unexpected WAN address')
+            stable+=1
+            if stable>=4:
+                print(label+' fixture stable; repairs='+str(repairs),flush=True)
+                return
+        time.sleep(.5)
+    raise Failure('fixture WAN did not stabilize')
 def normal(work):
     w=work/'v2-normal';w.mkdir(mode=0o700)
     uid=int(os.environ['VB_MITA_UID']);gid=int(os.environ['VB_MITA_GID'])
@@ -200,51 +247,7 @@ def normal(work):
     try:
         call('ip','link','add',WAN,'type','veth','peer','name','vb-peer','netns',CLIENT)
         original=json.loads(call('ip','-j','link','show','dev',WAN))[0]['ifindex']
-        for dev in ('lo','vb-peer'):call('ip','-n',CLIENT,'link','set',dev,'up')
-        call('ip','link','set',WAN,'up')
-        # Wait for both ends to have carrier before assigning the synthetic addresses.
-        for _ in range(30):
-            link=json.loads(call('ip','-j','link','show','dev',WAN))[0]
-            need(link['ifindex']==original,'fixture link replaced')
-            if 'LOWER_UP' in link['flags']:break
-            time.sleep(.1)
-        else:raise Failure('synthetic veth carrier missing')
-        for ip in ('198.18.254.2','198.18.254.3'):call('ip','-n',CLIENT,'addr','add',ip+'/29','dev','vb-peer')
-        call('ip','addr','add',IP+'/29','dev',WAN)
-        # Only during fixture creation: allow async link setup to settle, then
-        # verify exact address and identity. No address repair after apply starts.
-        def verify_fixture():
-            host=json.loads(call('ip','-j','-4','addr','show','dev',WAN))
-            peer=json.loads(call('ip','-n',CLIENT,'-j','-4','addr','show','dev','vb-peer'))
-            print('V2 fixture readback WAN='+str([(r['ifindex'],r.get('flags'),[(a.get('local'),a.get('prefixlen')) for a in r.get('addr_info',[])]) for r in host])+' peer='+str([(r['ifindex'],[(a.get('local'),a.get('prefixlen')) for a in r.get('addr_info',[])]) for r in peer]),flush=True)
-            need(len(host)==1 and host[0]['ifindex']==original and 'LOWER_UP' in host[0]['flags'] and any(a.get('local')==IP and a.get('prefixlen')==29 for a in host[0].get('addr_info',[])),'fixture WAN address/identity lost')
-            need(len(peer)==1 and {'198.18.254.2','198.18.254.3'}<={a['local'] for a in peer[0].get('addr_info',[]) if a.get('prefixlen')==29},'tester addresses missing')
-            need(not call('ip','-n',CLIENT,'route','show','default') and not call('ip','-n',CLIENT,'-6','route','show','default'),'unexpected default route')
-        # Recover only a missing address on the same owned link before any
-        # Transaction exists. Never repair a running deployment or a replaced link.
-        # Repeated loss is a failure, not an ignored guard.
-        stable=0
-        repairs=0
-        for attempt in range(15):
-            link=json.loads(call('ip','-j','link','show','dev',WAN))
-            need(len(link)==1 and link[0]['ifindex']==original and 'LOWER_UP' in link[0]['flags'],'fixture link identity/carrier lost')
-            host=json.loads(call('ip','-j','-4','addr','show','dev',WAN))
-            present=len(host)==1 and any(a.get('local')==IP and a.get('prefixlen')==29 for a in host[0].get('addr_info',[]))
-            if not present:
-                need(not host or (len(host)==1 and host[0]['ifindex']==original and not host[0].get('addr_info')),'unexpected WAN address state')
-                repairs+=1
-                need(repairs<=2,'fixture WAN repeatedly loses address')
-                print('V2 fixture missing IPv4 before transaction; reassigning once per observed loss, attempt='+str(repairs),flush=True)
-                # No address flush or route changes. Only the absent synthetic address.
-                call('ip','addr','add',IP+'/29','dev',WAN)
-                stable=0
-            else:
-                verify_fixture()
-                stable+=1
-                if stable>=4:break
-            time.sleep(.5)
-        else:raise Failure('fixture WAN did not stabilize')
-        print('V2 fixture stable; repairs='+str(repairs),flush=True)
+        configure_fixture(original,ns_inode)
         h=LabHost(w);baseline=canaries(h,True)
         print('V2 actual Docker backend '+str(h.obj('docker','info','--format','{{json .}}').get('FirewallBackend')),flush=True)
         t=Transaction(h,w/'journal.json',{'fixture':'normal','ip':IP,'images':[h.sbox,h.cfg['mita_image_id']]})

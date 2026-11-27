@@ -5,7 +5,7 @@ ROOT=pathlib.Path(__file__).resolve().parents[2]
 spec=importlib.util.spec_from_file_location('a10_acceptance',ROOT/'ci/release_v161/acceptance.py')
 a=importlib.util.module_from_spec(spec);spec.loader.exec_module(a)
 rc=a.rc
-from integration import call,need,copy_owned,no_ns,IP,WAN,CLIENT
+from integration import call,need,copy_owned,no_ns,IP,WAN,CLIENT,configure_fixture
 from lifecycle import save,Failure
 WORK=rc.WORK
 def gate():
@@ -15,6 +15,7 @@ def gate():
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def inspect(t):
     h=t.h
+    need(set(h.inventory('container',t.s['run']))==set(t.s['containers'].values()) and set(h.inventory('network',t.s['run']))==set(t.s['networks'].values()),'unexpected reboot inventory')
     out={}
     for name,id in t.s['containers'].items():
         x=h.inspect('container',id)
@@ -41,48 +42,7 @@ def before(work):
     if True:  # leave the fixture active across the reboot
         call('ip','link','add',WAN,'type','veth','peer','name','vb-peer','netns',CLIENT)
         original=json.loads(call('ip','-j','link','show','dev',WAN))[0]['ifindex']
-        for dev in ('lo','vb-peer'):call('ip','-n',CLIENT,'link','set',dev,'up')
-        call('ip','link','set',WAN,'up')
-        # Wait for both ends to have carrier before assigning the synthetic addresses.
-        for _ in range(30):
-            link=json.loads(call('ip','-j','link','show','dev',WAN))[0]
-            need(link['ifindex']==original,'fixture link replaced')
-            if 'LOWER_UP' in link['flags']:break
-            time.sleep(.1)
-        else:raise Failure('synthetic veth carrier missing')
-        for ip in ('198.18.254.2','198.18.254.3'):call('ip','-n',CLIENT,'addr','add',ip+'/29','dev','vb-peer')
-        call('ip','addr','add',IP+'/29','dev',WAN)
-        # Only before the transaction: one coherent address snapshot per
-        # decision. The old second addr read could lose the IPv4 between
-        # "present" and verify_fixture(), bypassing bounded repair.
-        stable=0;repairs=0
-        for attempt in range(15):
-            peer=json.loads(call('ip','-n',CLIENT,'-j','-4','addr','show','dev','vb-peer'))
-            need(len(peer)==1 and {'198.18.254.2','198.18.254.3'}<={a['local'] for a in peer[0].get('addr_info',[]) if a.get('prefixlen')==29},'tester addresses missing')
-            need(os.stat('/run/netns/'+CLIENT).st_ino==ns_inode,'fixture namespace replaced')
-            need(not call('ip','-n',CLIENT,'route','show','default') and not call('ip','-n',CLIENT,'-6','route','show','default'),'unexpected default route')
-            # Unfiltered address query includes link identity even with no IPv4.
-            host=json.loads(call('ip','-j','addr','show','dev',WAN))
-            need(len(host)==1 and host[0]['ifindex']==original and 'LOWER_UP' in host[0]['flags'],'fixture link identity/carrier lost')
-            addresses={(a.get('local'),a.get('prefixlen')) for a in host[0].get('addr_info',[]) if a.get('family')=='inet'}
-            print('A10 fixture readback WAN='+str(sorted(addresses))+' ifindex='+str(original)+' stable='+str(stable),flush=True)
-            if not addresses:
-                repairs+=1
-                need(repairs<=2,'fixture WAN repeatedly loses address')
-                print('A10 fixture missing IPv4 before transaction; repair='+str(repairs),flush=True)
-                # Reconfirm owned link before the sole permitted address addition.
-                link=json.loads(call('ip','-j','link','show','dev',WAN))
-                need(len(link)==1 and link[0]['ifindex']==original and 'LOWER_UP' in link[0]['flags'],'fixture link replaced before repair')
-                call('ip','addr','add',IP+'/29','dev',WAN)
-                stable=0
-            else:
-                need(addresses=={(IP,29)},'unexpected WAN address state')
-                stable+=1
-                if stable>=4:break
-            time.sleep(.5)
-        else:raise Failure('fixture WAN did not stabilize')
-        print('A10 fixture stable; repairs='+str(repairs),flush=True)
-
+        configure_fixture(original,ns_inode,'A10')
         m={'uid':uid,'gid':gid,'sbox':os.environ['VB_SBOX_IMAGE'],'mita':os.environ['VB_MITA_IMAGE'],'ifindex':original,'boot_id':rc.boot_id()}
         m['files']=rc.fingerprints(m);save(w/'fixture.json',m)
         h=rc.Host(m)
@@ -114,26 +74,8 @@ def after():
     no_ns(CLIENT);need(not {x['ifname'] for x in json.loads(call('ip','-j','link','show'))}&{WAN,'vb-peer'},'unexpected surviving fixture')
     call('ip','netns','add',CLIENT)
     call('ip','link','add',WAN,'type','veth','peer','name','vb-peer','netns',CLIENT)
-    for dev in ('lo','vb-peer'):call('ip','-n',CLIENT,'link','set',dev,'up')
-    call('ip','link','set',WAN,'up')
-    for ip in ('198.18.254.2','198.18.254.3'):call('ip','-n',CLIENT,'addr','add',ip+'/29','dev','vb-peer')
-    call('ip','addr','add',IP+'/29','dev',WAN)
-    # Same bounded address stabilization as before; no change to old metadata.
     probe_ifindex=json.loads(call('ip','-j','link','show','dev',WAN))[0]['ifindex']
-    stable=0;repairs=0
-    for _ in range(15):
-        time.sleep(.5)
-        link=json.loads(call('ip','-j','link','show','dev',WAN))
-        need(len(link)==1 and link[0]['ifindex']==probe_ifindex and 'LOWER_UP' in link[0]['flags'],'probe interface changed')
-        host=json.loads(call('ip','-j','-4','addr','show','dev',WAN))
-        if not (len(host)==1 and any(x.get('local')==IP and x.get('prefixlen')==29 for x in host[0].get('addr_info',[]))):
-            need(not host or (len(host)==1 and host[0]['ifindex']==probe_ifindex and not host[0].get('addr_info')),'unexpected probe address')
-            repairs+=1;need(repairs<=2,'probe address repeatedly lost')
-            call('ip','addr','add',IP+'/29','dev',WAN);stable=0;continue
-        need(not call('ip','-n',CLIENT,'route','show','default') and not call('ip','-n',CLIENT,'-6','route','show','default'),'unexpected default route')
-        stable+=1
-        if stable>=4:break
-    else:raise RuntimeError('postboot probe fixture unstable')
+    configure_fixture(probe_ifindex,os.stat('/run/netns/'+CLIENT).st_ino,'A10 postboot')
     # Confirm path to host by ARP/neighbour and IP-level ping before negatives.
     for src in ('198.18.254.2','198.18.254.3'):
         call('ip','netns','exec',CLIENT,'ping','-I',src,'-c','1','-W','3',IP)
@@ -157,6 +99,8 @@ def after():
     if not a.rollback_can_complete(exists,primary,t.s['table'],original,t.s['legacy'],bool(t.s['uncertain'] or t.s['pending'])):
         a.cli('rollback','RECOVERY_REQUIRED')
         result=a.state();need(result['phase']=='rollback_incomplete','guard mismatch not retained as incomplete')
+        # Refusal alone is not proof that known endpoints were cleaned up.
+        h.verify_absence(t.s['run'])
         need(h.table_exists()==exists and (not exists or h.cmd('nft','-s','list','table','inet','vpn_benchmark')==primary_raw) and legacy_snapshot()==legacy_raw,'remaining protection modified')
     else:
         print(a.cli('rollback'),flush=True);a.no_resources(h,t.s['run'])
