@@ -1,0 +1,36 @@
+name: VPN Benchmark A10 guest reboot
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tests/a10/**'
+      - '.github/workflows/a10.yml'
+  workflow_dispatch:
+    inputs:
+      lab_confirmed:
+        description: 'Run only inside a disposable QEMU guest'
+        type: boolean
+        required: true
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: vpn-benchmark-a10
+  cancel-in-progress: false
+jobs:
+  reboot:
+    if: ${{ github.repository == 'efremov-aleksei-96/vpn-benchmark' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.lab_confirmed) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Static checks and sealed base verification
+        run: |
+          bash -n tests/a10/run.sh
+          bash -n tests/a10/prepare-guest.sh
+          python3 -m py_compile tests/a10/guest.py
+          printf '%s\n' '7028ab00ed08b3d7a89adbc5ff41711323a9a990eda4fec8af518fbc26704c6e  ci/transaction_v2/lifecycle.py' 'c96a300abe817ff05b523b2966617453e01199326bb9becfd11a822f1021cedd  ci/transaction_v2/benchmark.py' | sha256sum -c -
+      - name: Actual guest reboot with KVM or TCG
+        run: bash tests/a10/run.sh
