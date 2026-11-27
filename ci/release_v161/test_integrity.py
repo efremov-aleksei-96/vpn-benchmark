@@ -290,4 +290,13 @@ class Integrity(unittest.TestCase):
             with self.assertRaisesRegex(rc.Failure,'namespace replaced'):lab.configure_fixture(7,9,'test')
             self.assertFalse(any('addr' in a.args and 'add' in a.args for a in call.call_args_list))
 
+    def test_https_denial_requires_observed_origin_and_no_new_accept(self):
+        addr='198.18.254.6';token=b'fixture';before='TCP_ACCEPT '+addr+'\n'
+        self.assertTrue(probe.https_denied(35,b'',token,addr,before,before+'DNS target.test 1\n'))
+        self.assertFalse(probe.https_denied(35,b'',token,addr,before,before+'TCP_ACCEPT '+addr+'\n'))
+        self.assertFalse(probe.https_denied(35,b'',token,addr,'',''))
+        self.assertFalse(probe.https_denied(35,b'',token,addr,before,''))
+        self.assertFalse(probe.https_denied(60,b'',token,addr,before,before))
+        self.assertFalse(probe.https_denied(0,b'',token,addr,before,before))
+        self.assertFalse(probe.https_denied(35,token,token,addr,before,before))
 if __name__=='__main__':unittest.main(verbosity=2)

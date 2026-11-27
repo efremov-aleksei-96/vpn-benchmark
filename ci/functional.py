@@ -1,5 +1,6 @@
 """Functional acceptance on the disposable runner, never a production system."""
 import json,os,pathlib,subprocess,sys,tempfile,time
+from probe import https_denied
 w=pathlib.Path(sys.argv[1]);ns=['ip','netns','exec','vb-client']
 TOKEN=b'vpn-benchmark-local-fixture-v1\n'
 def run(args,check=True,timeout=40,**kw):
@@ -7,14 +8,21 @@ def run(args,check=True,timeout=40,**kw):
 def probe(prefix,mode,dest,expect):
     run(prefix+[sys.executable,'ci/direct.py',mode,dest,expect])
 def inspect(id,fmt):return subprocess.check_output(['docker','inspect','--format',fmt,id],text=True).strip()
-def check_curl(label,url,expected,proxied=True):
+def check_curl(label,url,expected,proxied=True,blocked_addr=None):
     args=ns+['curl','--silent','--show-error','--fail','--http1.1','--max-time','15','--connect-timeout','5','--cacert',str(w/'target.pem'),'--noproxy','']
     args+=['--proxy','socks5h://127.0.0.1:19080'] if proxied else ['--proxy','']
+    origin=None;before=''
+    if blocked_addr:
+        origin=w/('host-fixture.log' if blocked_addr.startswith('172.30.') else 'wan-fixture.log')
+        before=origin.read_text()
     r=run(args+[url],check=False,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=18)
     ok=r.returncode==0 and r.stdout==TOKEN
     # For a deny check, an unexpected successful HTTP response is a failure
     # even if its body is not the marker.
-    result=ok if expected else r.returncode!=0 and TOKEN not in r.stdout
+    # Observe origin accepts as well as the client result. The existing
+    # positive TCP controls establish that each protected origin is live.
+    if origin:time.sleep(.3)
+    result=ok if expected else https_denied(r.returncode,r.stdout,TOKEN,blocked_addr,before,origin.read_text() if origin else '')
     print(label,'PASS' if result else 'FAIL','curl_exit',r.returncode,flush=True)
     if not result:raise RuntimeError(label)
 def client(label,good):
@@ -41,9 +49,9 @@ def client(label,good):
             host=label+'.target.test'
             if good:
                 check_curl(label+' authenticated HTTPS','https://'+host+'/'+label+'-good',True)
-                check_curl(label+' internal by IP','https://172.30.241.1/'+label+'-internal-ip',False)
-                check_curl(label+' internal by DNS','https://internal.test/'+label+'-internal-dns',False)
-                check_curl(label+' forbidden WAN destination','https://198.18.254.6/'+label+'-forbidden',False)
+                check_curl(label+' internal by IP','https://172.30.241.1/'+label+'-internal-ip',False,blocked_addr='172.30.241.1')
+                check_curl(label+' internal by DNS','https://internal.test/'+label+'-internal-dns',False,blocked_addr='172.30.241.1')
+                check_curl(label+' forbidden WAN destination','https://198.18.254.6/'+label+'-forbidden',False,blocked_addr='198.18.254.6')
                 # Verify a valid transaction still works after the negative controls.
                 check_curl(label+' positive control','https://'+host+'/'+label+'-control',True)
                 logtext=(w/'wan-fixture.log').read_text()
