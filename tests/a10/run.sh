@@ -66,7 +66,46 @@ wait_guest() {
   echo 'A10 guest SSH timeout'; return 1
 }
 wait_guest
-remote 'sudo cloud-init status --wait'
+# Preserve failure status and expose only sanitized diagnostic categories.
+set +e
+remote 'sudo cloud-init status --wait --format=json' >cloud-status.json
+cloud_rc=$?
+set -e
+echo "A10 cloud-init exit=$cloud_rc"
+python3 - "$cloud_rc" <<'PY'
+import json,pathlib,re,sys
+try: data=json.loads(pathlib.Path('cloud-status.json').read_text())
+except (ValueError,OSError):
+    print('A10 cloud-init diagnostic unavailable or not JSON')
+    sys.exit(0)
+# Never publish raw cloud-config, logs, host key material or arbitrary values.
+# Only error fields from the status report, with key lines/opaque tokens removed.
+private_lines=[]
+for name in ('host','client'):
+    private_lines.extend(x.strip() for x in pathlib.Path(name).read_text().splitlines() if len(x.strip())>15)
+def safe(value):
+    s=str(value)
+    for x in private_lines:s=s.replace(x,'[REDACTED]')
+    s=re.sub(r'-----BEGIN[^-]*PRIVATE KEY-----.*?-----END[^-]*PRIVATE KEY-----','[REDACTED]',s,flags=re.S)
+    s=re.sub(r'[A-Za-z0-9+/=_-]{32,}','[REDACTED]',s)
+    return ''.join(c if c.isprintable() else ' ' for c in s)[:400]
+def messages(value):
+    if isinstance(value,dict):
+        for v in value.values():yield from messages(v)
+    elif isinstance(value,list):
+        for v in value:yield from messages(v)
+    elif isinstance(value,str):yield value
+print('A10 cloud-init status='+safe(data.get('status'))+' extended='+safe(data.get('extended_status')))
+for stage in ('top','init-local','init','modules-config','modules-final'):
+    obj=data if stage=='top' else data.get(stage,{})
+    if not isinstance(obj,dict):continue
+    for kind in ('errors','recoverable_errors'):
+        for msg in list(messages(obj.get(kind,[])))[:12]:
+            print('A10 cloud-init '+stage+' '+kind+': '+safe(msg))
+PY
+# Nonzero remains a hard failure. Do not accept degraded initialization.
+[[ $cloud_rc == 0 ]]
+echo 'A10 cloud-init clean PASS'
 remote 'sudo test -f /etc/a10-disposable-guest && sudo mkdir -p /opt/vb-a10 && sudo chown ubuntu:ubuntu /opt/vb-a10'
 # Build Mita outside TCG. Source revision checked exactly, local image ID retained.
 git clone --depth 1 --branch v3.39.0 https://github.com/enfein/mieru.git "$d/mieru"
