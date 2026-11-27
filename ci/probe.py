@@ -10,6 +10,8 @@ def error_outcome(e):
 def matches(actual,expected):
     return actual in {'allow':{'CONNECTED'},'deny':{'REFUSED','TIMEOUT'},
                       'isolated':{'NO_ROUTE','REFUSED','TIMEOUT'}}[expected]
+def no_new_observation(marker,before,after):
+    return after.startswith(before) and marker in before.splitlines() and marker not in after[len(before):].splitlines()
 def https_denied(code,body,token,blocked_addr=None,before='',after=''):
     # Only observed proxy/network rejection categories, not arbitrary curl errors.
     if code not in (28,35,97) or token in body:return False
@@ -17,7 +19,7 @@ def https_denied(code,body,token,blocked_addr=None,before='',after=''):
     # The protected origin must have demonstrated TCP accept observability
     # before the negative test. A new accept disproves destination isolation.
     marker='TCP_ACCEPT '+blocked_addr
-    return after.startswith(before) and marker in before.splitlines() and marker not in after[len(before):].splitlines()
+    return no_new_observation(marker,before,after)
 def source_ready(src,dst):
     # All ingress callers run inside the synthetic client namespace.
     def query(*args):

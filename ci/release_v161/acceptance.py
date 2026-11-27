@@ -65,8 +65,11 @@ def filtered_ingress():
 def normal_tests(m,h):
     lab.sources()
     env=dict(os.environ);env.pop('GITHUB_ACTIONS',None);env.pop('RUNNER_ENVIRONMENT',None)
-    p=subprocess.run([sys.executable,str(HERE/'benchmark.py'),'apply'],env=env,capture_output=True)
-    need(p.returncode==78 and p.stderr.startswith(b'RC REFUSED LAB_REQUIRED:'),'new CLI not sealed outside lab')
+    for action in ('preflight','apply','status','stop','rollback'):
+        p=subprocess.run([sys.executable,str(HERE/'benchmark.py'),action],env=env,capture_output=True)
+        need(p.returncode==78 and p.stderr.startswith(b'RC REFUSED LAB_REQUIRED:'),'new CLI not sealed outside lab: '+action)
+    p=subprocess.run([sys.executable,str(HERE/'benchmark.py'),'start'],env=env,capture_output=True)
+    need(p.returncode==78 and p.stderr.startswith(b'RC REFUSED START_DISABLED:'),'start not sealed outside lab')
     report('A12','sealed base hashes and live locks; RC refuses non-CI execution')
     atomic_tests()
     with rc.lock():
@@ -107,7 +110,7 @@ def normal_tests(m,h):
 def docker_restart(m,h):
     print(cli('apply'),flush=True);t=rc.load(h,m,True);t.guard()
     call('systemctl','restart','docker')
-    s=state();need(s['containers']==2,'unexpected Docker inventory after restart')
+    s=state();need(s['containers']==2 and not s['local_ready'] and s['recovery_required'],'unexpected Docker inventory or readiness after restart')
     t.guard()
     for id in t.s['containers'].values():need(not h.running(id),'restart=no endpoint unexpectedly running')
     ingress('deny');ingress('deny','198.18.254.3')

@@ -1,12 +1,19 @@
 """Functional acceptance on the disposable runner, never a production system."""
 import json,os,pathlib,subprocess,sys,tempfile,time
-from probe import https_denied
+from probe import https_denied,no_new_observation
 w=pathlib.Path(sys.argv[1]);ns=['ip','netns','exec','vb-client']
 TOKEN=b'vpn-benchmark-local-fixture-v1\n'
 def run(args,check=True,timeout=40,**kw):
     return subprocess.run(args,check=check,timeout=timeout,**kw)
 def probe(prefix,mode,dest,expect):
+    observed=expect=='deny' and mode in ('dns-udp','dns-tcp')
+    origin=w/'wan-fixture.log'
+    before=origin.read_text() if observed else ''
     run(prefix+[sys.executable,'ci/direct.py',mode,dest,expect])
+    if observed:
+        time.sleep(.3)
+        marker='DNS_'+mode.split('-')[1].upper()+'_RECEIVED '+dest
+        if not no_new_observation(marker,before,origin.read_text()):raise RuntimeError('DNS origin denial not verified: '+mode+' '+dest)
 def inspect(id,fmt):return subprocess.check_output(['docker','inspect','--format',fmt,id],text=True).strip()
 def check_curl(label,url,expected,proxied=True,blocked_addr=None):
     args=ns+['curl','--silent','--show-error','--fail','--http1.1','--max-time','15','--connect-timeout','5','--cacert',str(w/'target.pem'),'--noproxy','']
@@ -59,7 +66,7 @@ def client(label,good):
                     raise RuntimeError(label+' missing DNS/HTTPS fixture evidence')
                 print(label,'DNS and HTTPS fixture evidence PASS',flush=True)
             else:
-                check_curl(label+' invalid credentials','https://198.18.254.4/'+label+'-bad',False)
+                check_curl(label+' invalid credentials','https://198.18.254.4/'+label+'-bad',False,blocked_addr='198.18.254.4')
                 if 'HTTP /'+label+'-bad' in (w/'wan-fixture.log').read_text():raise RuntimeError(label+' invalid credential reached origin')
         except Exception:
             with (w/(label+'-client.log')).open('rb') as errors:
@@ -75,6 +82,7 @@ probe(ns,'tcp','198.18.254.6','allow')
 probe(ns,'dns-udp','198.18.254.5','allow')
 probe(ns,'dns-tcp','198.18.254.5','allow')
 probe(ns,'dns-udp','198.18.254.6','allow')
+probe(ns,'dns-tcp','198.18.254.6','allow')
 for ip in ('172.30.241.1','172.30.242.1'):probe([],'tcp',ip,'allow')
 for var,peer in [('VB_C1','172.30.242.2'),('VB_C2','172.30.241.2')]:
     cid=os.environ[var];pid=inspect(cid,'{{.State.Pid}}');prefix=['nsenter','-t',pid,'-n']

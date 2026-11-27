@@ -2,6 +2,7 @@
 import json,os,pathlib,re,shlex,socket,ssl,subprocess,sys,time
 from legacy_guard_ci import call,check,need
 from legacy_guard import restore
+from probe import no_new_observation
 IP='198.18.254.1'
 NS=['ip','netns','exec','vb-client']
 PORTS=(18443,18444,18445)
@@ -130,8 +131,12 @@ def main(w):
                 ingress(port,'deny','198.18.254.3')
             for prefix in prefixes:
                 probe(prefix,'tcp','198.18.254.4','deny')
-                probe(prefix,'dns-udp','198.18.254.5','deny')
-                probe(prefix,'dns-tcp','198.18.254.5','deny')
+                for mode in ('dns-udp','dns-tcp'):
+                    origin=w/'wan-fixture.log';before_dns=origin.read_text()
+                    probe(prefix,mode,'198.18.254.5','deny')
+                    time.sleep(.3)
+                    marker='DNS_'+mode.split('-')[1].upper()+'_RECEIVED 198.18.254.5'
+                    need(no_new_observation(marker,before_dns,origin.read_text()),'independent DNS origin denial not verified')
             need(legacy_count('VB15_FWD')>before,'independent FORWARD drops not observed')
             before=legacy_count('VB15_OUT')
             for dest,port in zip(target,ports):

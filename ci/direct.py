@@ -2,6 +2,10 @@
 import socket,struct,sys
 from probe import error_outcome,matches
 
+def dns_response_valid(question,data):
+    # The synthetic server has a fixed A answer, no recursion and TTL zero.
+    expected=question[:2]+struct.pack('!HHHHH',0x8180,1,1,0,0)+question[12:]+b'\xc0\x0c'+struct.pack('!HHIH',1,1,0,4)+socket.inet_aton('198.18.254.4')
+    return data==expected
 def outcome(mode,dest):
     connected=False
     try:
@@ -23,7 +27,7 @@ def outcome(mode,dest):
                         if len(header)!=2:return 'INVALID_RESPONSE'
                         n=struct.unpack('!H',header)[0];data=f.read(n)
                         if len(data)!=n:return 'INVALID_RESPONSE'
-            return 'CONNECTED' if len(data)>12 and data[:2]==question[:2] and data[-4:]==socket.inet_aton('198.18.254.4') else 'INVALID_RESPONSE'
+            return 'CONNECTED' if dns_response_valid(question,data) else 'INVALID_RESPONSE'
         if mode=='ipv6':
             with socket.socket(socket.AF_INET6,socket.SOCK_STREAM) as s:
                 s.settimeout(2);s.connect((dest,443));return 'CONNECTED'

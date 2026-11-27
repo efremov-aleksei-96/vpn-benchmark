@@ -4,6 +4,17 @@ on:
     branches: [main]
     paths:
       - 'tests/a10/**'
+      # All runtime and test modules used by the guest and fast gate.
+      - 'ci/release_v161/**'
+      - 'ci/transaction_v2/**'
+      - 'ci/render.py'
+      - 'ci/template.py'
+      - 'ci/probe.py'
+      - 'ci/direct.py'
+      - 'ci/test_guard.py'
+      - 'ci/legacy_guard_ci.py'
+      - 'ci/lifecycle.py'
+      - 'candidate/**'
       - '.github/workflows/a10.yml'
   workflow_dispatch:
     inputs:

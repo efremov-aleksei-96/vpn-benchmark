@@ -17,7 +17,7 @@ apt-get update -qq
 # New disposable guest ONLY; configure the same classic image store as
 # the outer runner BEFORE Docker installation, never migrate existing data.
 [[ ! -e /etc/docker/daemon.json && ! -e /var/lib/docker && ! -e /var/lib/containerd ]]
-! command -v dockerd >/dev/null
+if command -v dockerd >/dev/null; then echo 'A10 refuses existing Docker installation'; exit 78; fi
 install -d -m 0755 /etc/docker
 printf '%s\n' '{"features":{"containerd-snapshotter":false},"storage-driver":"overlay2"}' >/etc/docker/daemon.json
 chmod 0644 /etc/docker/daemon.json

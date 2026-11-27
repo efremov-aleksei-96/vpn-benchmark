@@ -20,10 +20,13 @@ def dns_answer(data):
     return data[:2]+struct.pack('!HHHHH',0x8180,1,int(bool(answer)),0,0)+data[12:end]+answer
 class Udp(socketserver.BaseRequestHandler):
     def handle(self):
-        data,sock=self.request; out=dns_answer(data)
+        data,sock=self.request
+        print('DNS_UDP_RECEIVED '+self.server.server_address[0],flush=True)
+        out=dns_answer(data)
         if out: sock.sendto(out,self.client_address)
 class Tcp(socketserver.BaseRequestHandler):
     def handle(self):
+        print('DNS_TCP_RECEIVED '+self.server.server_address[0],flush=True)
         self.request.settimeout(3)
         f=self.request.makefile('rb'); head=f.read(2)
         if len(head)!=2:return
