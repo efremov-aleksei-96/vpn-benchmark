@@ -29,7 +29,7 @@ jobs:
           persist-credentials: false
       - name: Fast integrity regressions
         run: |
-          bash -n tests/a10/run.sh tests/a10/prepare-guest.sh ci/lab.sh
+          for script in tests/a10/run.sh tests/a10/prepare-guest.sh ci/lab.sh; do bash -n "$script"; done
           python3 -m py_compile ci/*.py candidate/*.py ci/transaction_v2/*.py ci/release_v161/*.py tests/a10/guest.py
           printf '%s\n' '7028ab00ed08b3d7a89adbc5ff41711323a9a990eda4fec8af518fbc26704c6e  ci/transaction_v2/lifecycle.py' 'c96a300abe817ff05b523b2966617453e01199326bb9becfd11a822f1021cedd  ci/transaction_v2/benchmark.py' | sha256sum -c -
           python3 ci/test_template.py
@@ -102,6 +102,7 @@ jobs:
           bash -n ci/verify-cleanup.sh
           bash -n ci/transaction_v2/prepare-docker.sh
           python3 -m py_compile ci/*.py candidate/*.py ci/transaction_v2/*.py ci/release_v161/*.py
+          python3 ci/release_v161/test_integrity.py
           printf '%s\n' '7028ab00ed08b3d7a89adbc5ff41711323a9a990eda4fec8af518fbc26704c6e  ci/transaction_v2/lifecycle.py' 'c96a300abe817ff05b523b2966617453e01199326bb9becfd11a822f1021cedd  ci/transaction_v2/benchmark.py' | sha256sum -c -
           python3 ci/test_template.py
           python3 -m json.tool candidate/sing-box.json >/dev/null
