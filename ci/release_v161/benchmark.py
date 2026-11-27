@@ -100,6 +100,10 @@ def interrupted_paths(p):
 def orphan_evidence(p,s):
     recorded={e.get('evidence') for e in s.get('events',[]) if e.get('result')=='interrupted_write_preserved'}
     return [x for x in sorted(p.parent.glob('journal.interrupted-*')) if x.name not in recorded]
+def local_docker(h):
+    require_code(h.cmd('docker','context','show')=='default','DOCKER_ENDPOINT')
+    rows=h.obj('docker','context','inspect','default')
+    require_code(len(rows)==1 and rows[0].get('Endpoints',{}).get('docker',{}).get('Host')=='unix:///var/run/docker.sock','DOCKER_ENDPOINT')
 class Host(lab.LabHost):
     def __init__(self,m):
         lab.gate();directory()
@@ -108,6 +112,15 @@ class Host(lab.LabHost):
         self.w=WORK;self.ns=None;self.uid=m['uid'];self.gid=m['gid'];self.sbox=m['sbox'];self.ifindex=m['ifindex']
         self.cfg={'public_ipv4':lab.IP,'wan_if':lab.WAN,'tester_cidrs':['198.18.254.2/32'],'reality_host':'example.com','acme_mode':'staging','mita_image_id':m['mita']}
         self.meta=m
+        # Recovery and status must enforce the same endpoint gate as apply.
+        local_docker(self)
+    def wan_guard(self):
+        host=self.obj('ip','-j','addr','show','dev',lab.WAN)
+        peer=self.obj('ip','-n',lab.CLIENT,'-j','addr','show','dev','vb-peer')
+        def ipv4(rows):return {(x.get('local'),x.get('prefixlen')) for x in rows[0].get('addr_info',[]) if x.get('family')=='inet'}
+        need(len(host)==1 and host[0]['ifindex']==self.ifindex and 'UP' in host[0]['flags'] and 'LOWER_UP' in host[0]['flags'] and ipv4(host)=={(lab.IP,29)},'WAN address/interface/carrier changed')
+        need(len(peer)==1 and 'LOWER_UP' in peer[0]['flags'] and ipv4(peer)=={('198.18.254.2',29),('198.18.254.3',29)},'tester fixture changed')
+        need(not self.cmd('ip','-n',lab.CLIENT,'route','show','default') and not self.cmd('ip','-n',lab.CLIENT,'-6','route','show','default'),'unexpected tester default route')
     def preflight(self,run):
         verify_config(self.meta)
         super().preflight(run)
@@ -203,6 +216,21 @@ def status(h,m):
         try:
             actual=h.legacy_fingerprint(f);result['legacy'+str(f)]='absent' if actual is None else ('owned' if t and actual==t.s['legacy'].get(str(f)) else 'unverified')
         except Failure:result['legacy'+str(f)]='unverified'
+    # A killed process can leave phase=applying with no pending operation.
+    # A guard without a journal is not a clean new state.
+    if t is None:
+        result['recovery_required'] |= result['primary_present'] or any(result['legacy'+str(f)]!='absent' for f in (4,6))
+    else:
+        result['recovery_required'] |= result['phase'] not in ('local_ready_external_pending','stopped','rolled_back_local_external_pending')
+        try:
+            expected_primary=t.s['table']
+            if result['phase']=='rolled_back_local_external_pending':
+                need(not containers and not networks and not result['primary_present'] and all(result['legacy'+str(f)]=='absent' for f in (4,6)),'rollback residuals')
+            else:
+                need(result['primary_present']==(expected_primary is not None) and (not result['primary_present'] or h.table_fingerprint(run)==expected_primary),'primary changed')
+                need(all(result['legacy'+str(f)]==('owned' if str(f) in t.s['legacy'] else 'absent') for f in (4,6)),'legacy changed')
+                if result['phase']=='stopped':need(not any(x['State']['Running'] for x in containers.values()),'stopped endpoint running')
+        except (Failure,OSError,KeyError,TypeError):result['recovery_required']=True
     if t and result['phase']=='local_ready_external_pending' and not result['recovery_required']:
         try:
             t.guard()

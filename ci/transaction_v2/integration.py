@@ -30,6 +30,12 @@ def sources():
     except Blocked:pass
     else:raise Failure('archive Host constructor not sealed')
     print('V2 PASS exact archive sources and production locks',flush=True)
+def local_docker_args(args):
+    # Explicit local Unix socket for actual Docker operations. Context
+    # inspection remains unmodified so it can detect a nondefault context.
+    if len(args)>1 and args[0]=='docker' and args[1]!='context':
+        return ('docker','--host','unix:///var/run/docker.sock',*args[1:])
+    return args
 class LabHost(Host):
     def __init__(self,w,ns=None):
         gate();self.w=w.resolve();self.ns=ns
@@ -52,7 +58,7 @@ class LabHost(Host):
                 need(p.is_file() and not p.is_symlink() and (st.st_uid,st.st_gid,st.st_mode&0o777)==(65532,65532,0o600),'unsafe synthetic TLS file')
             # Verify that the old check fails specifically for the missing file,
             # without printing arbitrary stderr or any credential values.
-            probe=subprocess.run(args,capture_output=True,text=True,timeout=timeout)
+            probe=subprocess.run(local_docker_args(args),capture_output=True,text=True,timeout=timeout)
             if probe.returncode:
                 missing=any(path in probe.stderr for path in ('/acme/cert.pem','/acme/key.pem')) and ('no such file' in probe.stderr.lower() or 'not found' in probe.stderr.lower())
                 print('V2 native check without fixture mount rc='+str(probe.returncode)+' missing_TLS_file='+str(missing),flush=True)
@@ -61,11 +67,11 @@ class LabHost(Host):
                 print('V2 native check without fixture mount succeeded; checking complete fixture too',flush=True)
             pos=args.index('--entrypoint')
             args=args[:pos]+('--mount','type=bind,src='+str(self.w/'acme')+',dst=/acme,readonly')+args[pos:]
-            result=super().cmd(*args,timeout=timeout,data=data)
+            result=super().cmd(*local_docker_args(args),timeout=timeout,data=data)
             print('V2 PASS native synthetic TLS check with read-only fixture mount',flush=True)
             return result
         if self.ns:args=('ip','netns','exec',self.ns,*args)
-        return super().cmd(*args,timeout=timeout,data=data)
+        return super().cmd(*local_docker_args(args),timeout=timeout,data=data)
     def verify_legacy_shape(self,f):
         try:super().verify_legacy_shape(f)
         except Failure:
