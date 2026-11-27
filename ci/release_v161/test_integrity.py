@@ -184,4 +184,31 @@ class Integrity(unittest.TestCase):
             self.assertEqual(probe.tcp_outcome('198.18.254.2','198.18.254.1',18443),'NO_ROUTE')
             connect.assert_not_called()
 
+    def legacy_fixture(self):
+        spec=importlib.util.spec_from_file_location('legacy_ci_only',ROOT/'ci/lifecycle.py')
+        old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)
+        l=object.__new__(old.Lifecycle)
+        l.s={'pending':'namespace','containers':{},'veth':True,'ifindex':'7','ns_inode':9}
+        return old,l
+    def test_legacy_fixture_recovers_missing_address_only_before_container(self):
+        old,l=self.legacy_fixture();present={(old.IP,29)}
+        with mock.patch.object(l,'fixture_addresses',side_effect=[set(),set(),present,present,present,present]),mock.patch.object(old,'out') as out,mock.patch.object(old.time,'sleep'):
+            l.stabilize_fixture()
+            out.assert_called_once_with('ip','addr','add',old.IP+'/29','dev','vb-wan')
+        l.s['pending']=None
+        with mock.patch.object(l,'fixture_addresses',return_value=set()),mock.patch.object(old,'out') as out:
+            with self.assertRaises(old.Failure):l.wan_guard()
+            with self.assertRaises(old.Failure):l.stabilize_fixture()
+            out.assert_not_called()
+    def test_legacy_fixture_repeated_loss_fails_closed(self):
+        old,l=self.legacy_fixture()
+        with mock.patch.object(l,'fixture_addresses',return_value=set()),mock.patch.object(old,'out') as out,mock.patch.object(old.time,'sleep'):
+            with self.assertRaisesRegex(old.Failure,'repeatedly loses'):l.stabilize_fixture()
+            self.assertEqual(out.call_count,2)
+    def test_legacy_fixture_foreign_address_not_repaired(self):
+        old,l=self.legacy_fixture()
+        with mock.patch.object(l,'fixture_addresses',return_value={('198.18.254.7',29)}),mock.patch.object(old,'out') as out:
+            with self.assertRaises(old.Failure):l.stabilize_fixture()
+            out.assert_not_called()
+
 if __name__=='__main__':unittest.main(verbosity=2)
