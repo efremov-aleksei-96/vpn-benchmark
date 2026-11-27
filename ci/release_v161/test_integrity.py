@@ -353,4 +353,30 @@ class Integrity(unittest.TestCase):
             self.assertEqual(result.returncode,expected_rc)
             self.assertEqual(result.stdout.splitlines().count('CALL'),expected_calls)
             self.assertEqual('INSTALL' in result.stdout,expected_rc==0)
+
+    def test_docker_restart_diagnostics_preserve_failure_and_redact(self):
+        import subprocess
+        script=(ROOT/'ci/transaction_v2/prepare-docker.sh').read_text()
+        diagnostics=script[script.index('docker_start_diagnostics() {'):script.index("target='29.1.3'")]
+        restart=script[script.index('  if systemctl restart docker; then'):script.index('\nfi\ndocker version --format')]
+        stub=r'''
+timeout(){ shift; "$@"; }
+systemctl(){
+    if [[ $1 == restart ]]; then return "$RESTART_RC"; fi
+    printf 'ActiveState=failed\nResult=exit-code\n'
+}
+dpkg-query(){ printf 'docker-ce 29.1.3\n'; }
+journalctl(){ printf '%s\n' 'failed to start daemon: failed to register bridge SECRET_TEST_VALUE' 'permission denied SECRET_TEST_VALUE'; }
+'''
+        for rc0 in (0,7):
+            p=subprocess.run(['bash','-ec','set -o pipefail\nRESTART_RC='+str(rc0)+'\n'+stub+diagnostics+restart+'\necho CONTINUED'],capture_output=True,text=True)
+            self.assertEqual(p.returncode,rc0)
+            self.assertEqual('CONTINUED' in p.stdout,rc0==0)
+            self.assertEqual('journal_categories=' in p.stderr,rc0!=0)
+            if rc0:
+                self.assertIn('firewall:1',p.stderr)
+                self.assertIn('permissions:1',p.stderr)
+                self.assertIn('ActiveState=failed',p.stderr)
+            self.assertNotIn('SECRET_TEST_VALUE',p.stdout+p.stderr)
+
 if __name__=='__main__':unittest.main(verbosity=2)

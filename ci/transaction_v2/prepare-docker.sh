@@ -7,6 +7,38 @@ set -Eeuo pipefail
 [[ $(docker context show) == default ]]
 [[ $(docker context inspect default --format '{{.Endpoints.docker.Host}}') == unix:///var/run/docker.sock ]]
 [[ -z $(docker ps -aq) ]] || { echo 'REFUSE: existing containers'; exit 1; }
+docker_start_diagnostics() {
+  echo 'Docker startup diagnostic (read-only, redacted categories)' >&2
+  timeout 10 systemctl show docker.service containerd.service docker.socket \
+    -p Id -p LoadState -p ActiveState -p SubState -p Result \
+    -p ExecMainCode -p ExecMainStatus -p NRestarts --no-pager >&2 || true
+  timeout 10 dpkg-query -W -f='${Package} ${Version}\n' docker-ce docker-ce-cli containerd.io >&2 || true
+  # Do not publish journal messages, which may contain addresses or paths.
+  # Journal access is bounded; unknown errors remain explicitly unclassified.
+  if ! timeout 10 journalctl -b -u docker.service -u containerd.service -u docker.socket \
+      --since '-5 minutes' -n 160 --no-pager -o cat 2>/dev/null | python3 -c '
+import re,sys
+patterns={
+"configuration":r"failed to (load|read|decode|parse).*config|invalid.*(configuration|directive)|specified both as a flag|unknown (flag|option|directive)",
+"containerd":r"failed to (connect|dial|start).*containerd|containerd.*(not running|unavailable|deadline exceeded)|failed to start containerd",
+"firewall":r"iptables.*(failed|error|permission denied|not found)|failed.*(iptables|nftables|nat chain)|failed to register.*bridge",
+"storage":r"error initializing graphdriver|failed to mount overlay|failed to (initialize|load).*snapshotter|storage driver.*(error|failed)|no space left on device|read-only file system",
+"socket":r"address already in use|failed to (listen|bind)|no sockets found via socket activation",
+"pidfile":r"pid file.*(exists|found)|process with pid.*running",
+"permissions":r"permission denied|operation not permitted",
+"start_limit":r"start request repeated too quickly|start-limit-hit",
+"timeout":r"deadline exceeded|timed out|timeout",
+"service_exit":r"main process exited|failed with result|failed to start|error starting daemon"
+}
+rows=sys.stdin.read().splitlines()
+print("journal_lines="+str(len(rows)))
+hits={k:sum(bool(re.search(p,line,re.I)) for line in rows) for k,p in patterns.items()}
+print("journal_categories="+(",".join(k+":"+str(v) for k,v in hits.items() if v) or "unclassified"))
+' >&2; then
+    echo 'Docker startup journal classification unavailable' >&2
+  fi
+  return 0
+}
 target='29.1.3'
 version="5:$target-1~ubuntu.24.04~noble"
 docker version --format 'Initial client={{.Client.Version}} server={{.Server.Version}} API={{.Server.APIVersion}}'
@@ -38,7 +70,16 @@ if [[ $(docker version --format '{{.Server.Version}}') != "$target" || $(docker 
   # Exact signed version; fail rather than substitute an unreviewed package.
   apt-cache "${opts[@]}" madison docker-ce docker-ce-cli
   DEBIAN_FRONTEND=noninteractive apt-get "${opts[@]}" install -y --no-install-recommends --allow-downgrades "docker-ce=$version" "docker-ce-cli=$version"
-  systemctl restart docker
+  # Diagnose the original failure before another action can obscure it.
+  # Only public, synthetic hosted-runner metadata; no raw logs/config/env.
+  if systemctl restart docker; then
+    :
+  else
+    rc=$?
+    echo "Docker preparation restart failed rc=$rc" >&2
+    docker_start_diagnostics
+    exit "$rc"
+  fi
 fi
 docker version --format 'Target client={{.Client.Version}} server={{.Server.Version}} API={{.Server.APIVersion}}'
 [[ $(docker version --format '{{.Server.Version}}') == "$target" && $(docker version --format '{{.Client.Version}}') == "$target" ]]
