@@ -72,6 +72,12 @@ for file in sing-box-acme.json sing-box-lab.json; do
   docker run --rm --network none --entrypoint sing-box -v "$WORK:/lab:ro" "$SBOX" check -c "/lab/$file" >/dev/null 2>&1 || { echo "FAIL: native sing-box check $file"; exit 1; }
 done
 export VB_SBOX_IMAGE=$SBOX VB_MITA_IMAGE=$MITA
+if [[ ${VB_RELEASE_V161:-0} == 1 ]]; then
+  MATRIX_ACTIVE=1
+  python3 ci/release_v161/acceptance.py "$WORK"
+  MATRIX_ACTIVE=0
+  exit 0
+fi
 if [[ ${VB_TRANSACTION_V2:-0} == 1 ]]; then
   MATRIX_ACTIVE=1
   python3 ci/transaction_v2/integration.py "$WORK"
