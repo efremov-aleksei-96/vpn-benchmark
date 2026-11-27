@@ -143,24 +143,60 @@ class Lifecycle:
             need(exact_id(id),'missing network ID');self.s['networks'][n]=id;self.save();self.verify_net(i,inspect('network',id))
         self.mutate(stage,['docker','network','create',*self.label_args(),'--driver','bridge','--ipv6=false','--subnet',subnet,'--opt','com.docker.network.bridge.name='+bridge,n],accept)
         self.point(stage)
+    def fixture_addresses(self):
+        need(self.s['veth'] and os.stat('/run/netns/vb-client').st_ino==self.s['ns_inode'],'namespace identity mismatch')
+        host=obj('ip','-j','addr','show','dev','vb-wan')
+        peer=obj('ip','-n','vb-client','-j','addr','show','dev','vb-peer')
+        need(len(host)==1 and str(host[0]['ifindex'])==self.s['ifindex'] and 'LOWER_UP' in host[0]['flags'],'WAN identity/carrier mismatch')
+        need(len(peer)==1 and 'LOWER_UP' in peer[0]['flags'],'tester link/carrier mismatch')
+        def ipv4(rows):
+            return {(x.get('local'),x.get('prefixlen')) for x in rows[0].get('addr_info',[]) if x.get('family')=='inet'}
+        need({('198.18.254.2',29),('198.18.254.3',29)}<=ipv4(peer),'synthetic tester address missing')
+        need(not out('ip','-n','vb-client','route','show','default') and not out('ip','-n','vb-client','-6','route','show','default'),'unexpected namespace default route')
+        return ipv4(host)
+    def stabilize_fixture(self):
+        # Only during creation of the owned fixture, before any container.
+        need(self.s['pending']=='namespace' and not self.s['containers'],'fixture repair forbidden after creation')
+        stable=0;repairs=0
+        for _ in range(15):
+            addresses=self.fixture_addresses()
+            print('LIFECYCLE fixture readback WAN='+str(sorted(addresses))+' stable='+str(stable),flush=True)
+            if not addresses:
+                repairs+=1;need(repairs<=2,'fixture WAN repeatedly loses address')
+                current=self.fixture_addresses()
+                if not current:
+                    out('ip','addr','add',IP+'/29','dev','vb-wan')
+                    print('LIFECYCLE fixture IPv4 repair='+str(repairs),flush=True)
+                else:need(current=={(IP,29)},'unexpected synthetic WAN address')
+                stable=0
+            else:
+                need(addresses=={(IP,29)},'unexpected synthetic WAN address')
+                stable+=1
+                if stable==4:return
+            time.sleep(.5)
+        raise Failure('fixture WAN did not stabilize')
     def namespace(self):
         self.table_guard()
-        # The veth is a CI fixture only, created after builds and bridges.
         self.s['pending']='namespace';self.event('namespace','intent')
         out('ip','netns','add','vb-client');self.s['namespace']=True;self.s['ns_inode']=os.stat('/run/netns/vb-client').st_ino;self.save()
-        out('ip','link','add','vb-wan','type','veth','peer','name','vb-peer');self.s['veth']=True;self.s['ifindex']=pathlib.Path('/sys/class/net/vb-wan/ifindex').read_text().strip();self.save()
-        out('ip','link','set','vb-peer','netns','vb-client')
-        out('ip','addr','add',IP+'/29','dev','vb-wan');out('ip','link','set','vb-wan','up')
-        for a in ('198.18.254.2','198.18.254.3'):out('ip','-n','vb-client','addr','add',a+'/29','dev','vb-peer')
+        out('ip','link','add','vb-wan','type','veth','peer','name','vb-peer','netns','vb-client')
+        self.s['veth']=True;self.s['ifindex']=pathlib.Path('/sys/class/net/vb-wan/ifindex').read_text().strip();self.save()
         for dev in ('lo','vb-peer'):out('ip','-n','vb-client','link','set',dev,'up')
-        self.s['ifindex']=pathlib.Path('/sys/class/net/vb-wan/ifindex').read_text().strip()
+        out('ip','link','set','vb-wan','up')
+        for _ in range(30):
+            host=obj('ip','-j','link','show','dev','vb-wan')
+            peer=obj('ip','-n','vb-client','-j','link','show','dev','vb-peer')
+            need(len(host)==1 and str(host[0]['ifindex'])==self.s['ifindex'] and len(peer)==1,'fixture link identity mismatch')
+            if 'LOWER_UP' in host[0]['flags'] and 'LOWER_UP' in peer[0]['flags']:break
+            time.sleep(.1)
+        else:raise Failure('fixture carrier unavailable')
+        for a in ('198.18.254.2','198.18.254.3'):out('ip','-n','vb-client','addr','add',a+'/29','dev','vb-peer')
+        out('ip','addr','add',IP+'/29','dev','vb-wan')
+        self.stabilize_fixture()
         self.s['pending']=None;self.save();self.wan_guard();self.point('namespace')
     def wan_guard(self):
-        need(self.s['veth'] and pathlib.Path('/sys/class/net/vb-wan/ifindex').read_text().strip()==self.s['ifindex'],'WAN identity mismatch')
-        def ips(*args):return {a['local'] for x in obj(*args) for a in x.get('addr_info',[]) if a.get('prefixlen')==29}
-        need(IP in ips('ip','-j','-4','addr','show','dev','vb-wan'),'synthetic WAN address missing')
-        need({'198.18.254.2','198.18.254.3'}<=ips('ip','-n','vb-client','-j','-4','addr','show','dev','vb-peer'),'synthetic tester address missing')
-        need(not out('ip','-n','vb-client','route','show','default') and not out('ip','-n','vb-client','-6','route','show','default'),'unexpected namespace default route')
+        # Read-only after creation, never repair active endpoints.
+        need(self.fixture_addresses()=={(IP,29)},'synthetic WAN address missing or unexpected')
     def ports(self,i):return {18443:18443,18445:18445,80:8080} if i==0 else {18444:18444}
     def command(self,i):
         n,_,_,addr=NETS[i]
