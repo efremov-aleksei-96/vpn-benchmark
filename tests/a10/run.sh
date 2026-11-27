@@ -133,15 +133,21 @@ PY
 echo 'A10 cloud-init clean PASS'
 remote 'sudo test -f /etc/a10-disposable-guest && sudo mkdir -p /opt/vb-a10 && sudo chown ubuntu:ubuntu /opt/vb-a10'
 # Build Mita outside TCG. Source revision checked exactly, local image ID retained.
+# Do not modify the outer runner's Docker daemon or migrate its image store.
+docker info --format 'A10 outer storage driver={{.Driver}} driver_status={{json .DriverStatus}}'
+[[ $(docker info --format '{{.Driver}}') == overlay2 ]]
+[[ $(docker info --format '{{json .DriverStatus}}') != *io.containerd.snapshotter.v1* ]]
 git clone --depth 1 --branch v3.39.0 https://github.com/enfein/mieru.git "$d/mieru"
 [[ $(git -C "$d/mieru" rev-parse HEAD) == bcd14b88d0fb7e7707bb80e5d7f6c33675d26c06 ]]
 docker build -t vb-mita-a10 -f "$d/mieru/deployments/docker/mita/Dockerfile" "$d/mieru"
 docker image inspect vb-mita-a10 --format '{{.Id}}' >mita.id
 docker save vb-mita-a10 -o mita.tar
+# Digest of the exact transferred archive, independently checked in guest.
+printf '%s  vb-a10-mita.tar\n' "$(sha256sum mita.tar | awk '{print $1}')" >mita.sha256
 # Copy only tracked source, no .git, runner tokens, or credentials.
 git -C "$root" archive HEAD | remote 'tar -x -C /opt/vb-a10'
-scp "${sshopt[@]}" -P 22222 mita.tar mita.id ubuntu@127.0.0.1:/tmp/
-remote 'sudo mv /tmp/mita.tar /opt/vb-a10-mita.tar && sudo mv /tmp/mita.id /opt/vb-a10-mita.id && sudo chown -R root:root /opt/vb-a10 && sudo bash /opt/vb-a10/tests/a10/prepare-guest.sh'
+scp "${sshopt[@]}" -P 22222 mita.tar mita.id mita.sha256 ubuntu@127.0.0.1:/tmp/
+remote 'sudo mv /tmp/mita.tar /opt/vb-a10-mita.tar && sudo mv /tmp/mita.id /opt/vb-a10-mita.id && sudo mv /tmp/mita.sha256 /opt/vb-a10-mita.sha256 && sudo chown -R root:root /opt/vb-a10 && sudo bash /opt/vb-a10/tests/a10/prepare-guest.sh'
 old=$(remote 'cat /proc/sys/kernel/random/boot_id')
 echo "A10 old boot recorded"
 # Start real guest reboot; only the outer runner remains active.

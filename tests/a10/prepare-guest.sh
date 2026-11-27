@@ -14,10 +14,24 @@ gpg --batch --show-keys --with-colons "$key" | awk -F: '$1=="fpr"&&!seen++{print
 chmod 644 "$key"
 echo "deb [arch=amd64 signed-by=$key] https://download.docker.com/linux/ubuntu noble stable" >/etc/apt/sources.list.d/docker.list
 apt-get update -qq
+# New disposable guest ONLY; configure the same classic image store as
+# the outer runner BEFORE Docker installation, never migrate existing data.
+[[ ! -e /etc/docker/daemon.json && ! -e /var/lib/docker && ! -e /var/lib/containerd ]]
+! command -v dockerd >/dev/null
+install -d -m 0755 /etc/docker
+printf '%s\n' '{"features":{"containerd-snapshotter":false},"storage-driver":"overlay2"}' >/etc/docker/daemon.json
+chmod 0644 /etc/docker/daemon.json
 version='5:29.1.3-1~ubuntu.24.04~noble'
 apt-get install -y --no-install-recommends "docker-ce=$version" "docker-ce-cli=$version" containerd.io
 systemctl enable --now docker
 bash ci/transaction_v2/prepare-docker.sh
+docker info --format 'A10 guest storage driver={{.Driver}} driver_status={{json .DriverStatus}}'
+[[ $(docker info --format '{{.Driver}}') == overlay2 ]]
+[[ $(docker info --format '{{json .DriverStatus}}') != *io.containerd.snapshotter.v1* ]]
+[[ -z $(docker ps -aq) && -z $(docker image ls -aq) ]]
+echo 'A10 empty classic guest image store PASS'
+(cd /opt && sha256sum --check vb-a10-mita.sha256)
+echo 'A10 transferred Mita archive SHA256 PASS'
 # Use the exact pinned sing-box digest; load the image built on the outer CI runner.
 SBOX_REF=ghcr.io/sagernet/sing-box@sha256:0788ffbddab2c68a99a2dd4780bbc50902f159af6f589df3ee74a8389d278279
 docker pull --platform linux/amd64 "$SBOX_REF"
