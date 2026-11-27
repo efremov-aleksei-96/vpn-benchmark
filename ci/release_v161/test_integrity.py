@@ -6,7 +6,7 @@ HERE=pathlib.Path(__file__).resolve().parent
 ROOT=HERE.parents[1]
 spec=importlib.util.spec_from_file_location('integrity_rc',HERE/'benchmark.py')
 rc=importlib.util.module_from_spec(spec);spec.loader.exec_module(rc)
-import probe
+import probe,direct
 aspec=importlib.util.spec_from_file_location('integrity_acceptance',HERE/'acceptance.py')
 acceptance=importlib.util.module_from_spec(aspec);aspec.loader.exec_module(acceptance)
 
@@ -25,7 +25,7 @@ class Integrity(unittest.TestCase):
         h=mock.Mock()
         t=object.__new__(rc.Tx);t.h=h;t.path=self.w/'journal.json'
         t.s={'run':'a'*32,'phase':'local_ready_external_pending','pending':None,'uncertain':[],
-             'containers':{'vpn-test-singbox':'a'*64},'networks':{},'events':[]}
+             'containers':{'vpn-test-singbox':'a'*64},'networks':{},'events':[],'legacy':{},'table':None}
         return t,h
     def test_unrecorded_running_container_cannot_report_stopped(self):
         t,h=self.tx()
@@ -54,10 +54,12 @@ class Integrity(unittest.TestCase):
         # failed fixture, inventory, file hash, or boot check.
         t.s['containers']={'vpn-test-singbox':'a'*64,'vpn-test-mita':'b'*64}
         t.s['networks']={'vb-sbox':'c'*64,'vb-mita':'d'*64}
-        containers={x:{} for x in t.s['containers'].values()}
-        if extra:containers[extra]={}
+        t.s['table']='f'*64;t.s['legacy']={'4':'4'*64,'6':'6'*64}
+        containers={x:{'State':{'Running':True}} for x in t.s['containers'].values()}
+        if extra:containers[extra]={'State':{'Running':True}}
         h.inventory.side_effect=lambda kind,run:containers if kind=='container' else {x:{} for x in t.s['networks'].values()}
-        h.legacy_fingerprint.return_value=None;h.table_exists.return_value=True
+        h.legacy_fingerprint.side_effect=lambda f:t.s['legacy'][str(f)]
+        h.table_exists.return_value=True;h.table_fingerprint.return_value=t.s['table']
         t.guard=mock.Mock();(self.w/'journal.json').touch()
         out=io.StringIO()
         m={'boot_id':'boot','files':{}}
@@ -210,5 +212,82 @@ class Integrity(unittest.TestCase):
         with mock.patch.object(l,'fixture_addresses',return_value={('198.18.254.7',29)}),mock.patch.object(old,'out') as out:
             with self.assertRaises(old.Failure):l.stabilize_fixture()
             out.assert_not_called()
+
+    def test_status_interrupted_phase_without_pending(self):
+        t,h=self.tx();t.s['phase']='applying'
+        r=self.status_result(t,h)
+        self.assertTrue(r['recovery_required']);self.assertFalse(r['local_ready'])
+    def test_status_stopped_running_endpoint(self):
+        t,h=self.tx();t.s['phase']='stopped'
+        r=self.status_result(t,h)
+        self.assertTrue(r['recovery_required']);self.assertFalse(r['local_ready'])
+    def test_status_unowned_firewall(self):
+        h=mock.Mock();h.inventory.return_value={};h.legacy_fingerprint.return_value=None
+        m={'boot_id':'boot','files':{}}
+        for present in (False,True):
+            h.table_exists.return_value=present
+            out=io.StringIO()
+            with mock.patch.object(rc,'fingerprints',return_value={}),mock.patch.object(rc,'boot_id',return_value='boot'),contextlib.redirect_stdout(out):
+                rc.status(h,m)
+            self.assertEqual(json.loads(out.getvalue())['recovery_required'],present)
+    def test_docker_context_refusal(self):
+        h=mock.Mock();h.cmd.return_value='remote'
+        with self.assertRaisesRegex(rc.Failure,'DOCKER_ENDPOINT'):rc.local_docker(h)
+        h.obj.assert_not_called()
+        h.cmd.return_value='default'
+        h.obj.return_value=[{'Endpoints':{'docker':{'Host':'tcp://example.invalid:2376'}}}]
+        with self.assertRaisesRegex(rc.Failure,'DOCKER_ENDPOINT'):rc.local_docker(h)
+        h.obj.return_value=[{'Endpoints':{'docker':{'Host':'unix:///var/run/docker.sock'}}}]
+        rc.local_docker(h)
+    def test_docker_actual_commands_pinned(self):
+        self.assertEqual(rc.lab.local_docker_args(('docker','stop','a')),('docker','--host','unix:///var/run/docker.sock','stop','a'))
+        self.assertEqual(rc.lab.local_docker_args(('docker','context','show')),('docker','context','show'))
+        self.assertEqual(rc.lab.local_docker_args(('ip','link')),('ip','link'))
+    def test_wan_guard_carrier_and_exact_addresses(self):
+        h=object.__new__(rc.Host);h.ifindex=7
+        host={'ifindex':7,'flags':['UP','LOWER_UP'],'addr_info':[{'family':'inet','local':rc.lab.IP,'prefixlen':29}]}
+        peer={'ifindex':8,'flags':['UP','LOWER_UP'],'addr_info':[{'family':'inet','local':a,'prefixlen':29} for a in ('198.18.254.2','198.18.254.3')]}
+        h.obj=mock.Mock(side_effect=lambda *args:[peer] if 'vb-peer' in args else [host]);h.cmd=mock.Mock(return_value='')
+        h.wan_guard()
+        host['flags']=['UP']
+        with self.assertRaises(rc.Failure):h.wan_guard()
+        host['flags']=['UP','LOWER_UP'];host['addr_info'].append({'family':'inet','local':'198.18.254.7','prefixlen':29})
+        with self.assertRaises(rc.Failure):h.wan_guard()
+    def test_dns_tcp_handshake_is_not_deny(self):
+        sock=mock.MagicMock();sock.__enter__.return_value=sock
+        sock.sendall.side_effect=TimeoutError()
+        with mock.patch('socket.create_connection',return_value=sock):
+            actual=direct.outcome('dns-tcp','198.18.254.5')
+        self.assertEqual(actual,'CONNECTED_NO_RESPONSE')
+        self.assertFalse(probe.matches(actual,'deny'))
+        with mock.patch('socket.create_connection',side_effect=TimeoutError()):
+            self.assertEqual(direct.outcome('dns-tcp','198.18.254.5'),'TIMEOUT')
+    def test_dns_tcp_short_body_rejected(self):
+        sock=mock.MagicMock();sock.__enter__.return_value=sock
+        f=sock.makefile.return_value.__enter__.return_value;f.read.side_effect=[b'\x00\x20',b'\x31\x37'+b'\0'*8+b'\xc6\x12\xfe\x04']
+        with mock.patch('socket.create_connection',return_value=sock):
+            self.assertEqual(direct.outcome('dns-tcp','198.18.254.5'),'INVALID_RESPONSE')
+    def test_shared_fixture_repair_exact_identity(self):
+        lab=rc.lab;adds=[];host_reads=0
+        def fake(*args):
+            nonlocal host_reads
+            if args[:4]==('ip','-n',lab.CLIENT,'-j') and 'link' in args:
+                return json.dumps([{'ifindex':8}])
+            if args[:4]==('ip','-n',lab.CLIENT,'-j'):
+                return json.dumps([{'ifindex':8,'flags':['LOWER_UP'],'addr_info':[{'family':'inet','local':x,'prefixlen':29} for x in ('198.18.254.2','198.18.254.3')]}])
+            if args[:3]==('ip','-j','addr'):
+                host_reads+=1
+                addresses=[] if host_reads<=3 else [{'family':'inet','local':lab.IP,'prefixlen':29}]
+                return json.dumps([{'ifindex':7,'flags':['LOWER_UP'],'addr_info':addresses}])
+            if args==('ip','addr','add',lab.IP+'/29','dev',lab.WAN):adds.append(args)
+            return ''
+        with mock.patch.object(lab,'call',side_effect=fake),mock.patch.object(lab.os,'stat',return_value=types.SimpleNamespace(st_ino=9)),mock.patch.object(lab.time,'sleep'):
+            lab.configure_fixture(7,9,'test')
+        self.assertEqual(len(adds),2);self.assertEqual(host_reads,7)
+    def test_shared_fixture_replaced_namespace_refused(self):
+        lab=rc.lab
+        with mock.patch.object(lab,'call',return_value='[{"ifindex":8}]') as call,mock.patch.object(lab.os,'stat',return_value=types.SimpleNamespace(st_ino=10)):
+            with self.assertRaisesRegex(rc.Failure,'namespace replaced'):lab.configure_fixture(7,9,'test')
+            self.assertFalse(any('addr' in a.args and 'add' in a.args for a in call.call_args_list))
 
 if __name__=='__main__':unittest.main(verbosity=2)

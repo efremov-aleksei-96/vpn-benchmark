@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 umask 077
 [[ ${GITHUB_ACTIONS:-} == true && ${RUNNER_ENVIRONMENT:-} == github-hosted && ${GITHUB_REPOSITORY:-} == efremov-aleksei-96/vpn-benchmark ]] || exit 78
+[[ -z ${DOCKER_HOST:-} && -z ${DOCKER_CONTEXT:-} && -z ${DOCKER_API_VERSION:-} ]] || exit 78
+[[ $(docker context show) == default && $(docker context inspect default --format '{{.Endpoints.docker.Host}}') == unix:///var/run/docker.sock ]] || exit 78
 root=$PWD
 d=$(mktemp -d)
 qpid=''

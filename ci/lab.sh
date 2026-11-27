@@ -3,6 +3,8 @@
 set -Eeuo pipefail
 umask 077
 [[ ${GITHUB_ACTIONS:-} == true && ${RUNNER_ENVIRONMENT:-} == github-hosted && $EUID == 0 ]] || { echo 'REFUSE: not GitHub-hosted runner'; exit 78; }
+[[ -z ${DOCKER_HOST:-} && -z ${DOCKER_CONTEXT:-} && -z ${DOCKER_API_VERSION:-} ]] || exit 78
+[[ $(docker context show) == default && $(docker context inspect default --format '{{.Endpoints.docker.Host}}') == unix:///var/run/docker.sock ]] || exit 78
 cd "$(dirname "$0")/.."
 ROOT=$PWD; WORK=$(mktemp -d); chmod 755 "$WORK"
 FIXTURE=''; HOST_FIXTURE=''; MATRIX_ACTIVE=0

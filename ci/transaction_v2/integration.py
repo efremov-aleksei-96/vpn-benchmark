@@ -15,7 +15,7 @@ def gate():
     need(os.geteuid()==0 and os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted','disposable hosted CI only')
     need(not os.environ.get('DOCKER_HOST') and not os.environ.get('DOCKER_CONTEXT'),'remote Docker forbidden')
 def call(*args,data=None):
-    p=subprocess.run(args,input=data,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=45)
+    p=subprocess.run(local_docker_args(args),input=data,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=45)
     need(p.returncode==0,'fixture command failed: '+args[0]+' rc='+str(p.returncode))
     return p.stdout.strip()
 def sources():
