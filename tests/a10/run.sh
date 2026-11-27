@@ -35,7 +35,7 @@ printf 'instance-id: vb-a10-guest\nlocal-hostname: vb-a10-guest\n' >meta-data
 python3 - <<'PY'
 import pathlib,json
 p=pathlib.Path
-config={'users':[{'name':'ubuntu','sudo':'ALL=(ALL) NOPASSWD:ALL','shell':'/bin/bash','ssh_authorized_keys':[p('client.pub').read_text().strip()]}],'ssh_pwauth':False,'disable_root':True,'ssh_deletekeys':False,'ssh_genkeytypes':[],'ssh_keys':{'ed25519_private':p('host').read_text(),'ed25519_public':p('host.pub').read_text()},'write_files':[{'path':'/etc/a10-disposable-guest','content':'A10 disposable QEMU guest\n','permissions':'0600'}]}
+config={'users':[{'name':'ubuntu','sudo':'ALL=(ALL) NOPASSWD:ALL','shell':'/bin/bash','ssh_authorized_keys':[p('client.pub').read_text().strip()]}],'ssh_pwauth':False,'disable_root':True,'ssh_deletekeys':False,'ssh_keys':{'ed25519_private':p('host').read_text(),'ed25519_public':p('host.pub').read_text()},'write_files':[{'path':'/etc/a10-disposable-guest','content':'A10 disposable QEMU guest\n','permissions':'0600'}]}
 p('user-data').write_text('#cloud-config\n'+json.dumps(config)+'\n')
 PY
 cloud-localds seed.img user-data meta-data
@@ -102,6 +102,31 @@ for stage in ('top','init-local','init','modules-config','modules-final'):
     for kind in ('errors','recoverable_errors'):
         for msg in list(messages(obj.get(kind,[])))[:12]:
             print('A10 cloud-init '+stage+' '+kind+': '+safe(msg))
+PY
+# Use the guest's exact installed schema; never print raw config or validator
+# output because it contains the disposable SSH host key.
+remote 'sudo python3 -' <<'PY'
+import json,pathlib,subprocess,tempfile,os
+p=pathlib.Path('/var/lib/cloud/instance/user-data.txt')
+raw=p.read_text()
+assert raw.startswith('#cloud-config\n')
+cfg=json.loads(raw.split('\n',1)[1])
+assert 'ssh_genkeytypes' not in cfg and 'ed25519_private' in cfg['ssh_keys']
+print('A10 guest cloud-init version: '+subprocess.check_output(['cloud-init','--version'],stderr=subprocess.STDOUT,text=True).strip(),flush=True)
+with tempfile.TemporaryDirectory(prefix='a10-schema-') as tmp:
+    path=pathlib.Path(tmp)/'user-data'
+    def check(data):
+        path.write_text('#cloud-config\n'+json.dumps(data)+'\n')
+        os.chmod(path,0o600)
+        return subprocess.run(['cloud-init','schema','-c',str(path)],capture_output=True,text=True)
+    good=check(cfg)
+    print('A10 corrected config schema exit='+str(good.returncode),flush=True)
+    assert good.returncode==0,'corrected config rejected by guest schema'
+    bad=check(dict(cfg,ssh_genkeytypes=[]))
+    matched='ssh_genkeytypes' in (bad.stdout+bad.stderr)
+    print('A10 old config schema exit='+str(bad.returncode)+' field_matched='+str(matched),flush=True)
+    assert bad.returncode!=0 and matched,'old empty-list defect not reproduced'
+print('A10 schema differential PASS',flush=True)
 PY
 # Nonzero remains a hard failure. Do not accept degraded initialization.
 [[ $cloud_rc == 0 ]]
